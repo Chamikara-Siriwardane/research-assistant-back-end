@@ -1,0 +1,118 @@
+"""
+agents/orchestrator.py
+----------------------
+Public interface between the FastAPI streaming route and the LangGraph graph.
+
+`run_research_pipeline` is an async generator that:
+  1. Feeds the user query into the compiled graph via `astream_events`.
+  2. Translates granular LangGraph / LangChain callback events into the
+     SSE-formatted strings that `api/chat.py` forwards to the browser.
+
+Event mapping
+-------------
+  on_chain_start  (agent nodes)      → ThoughtEvent  ("Agent X is working…")
+  on_chat_model_stream (synthesizer) → TextEvent     (streamed answer token)
+  exceptions                         → ErrorEvent
+  graph end                          → [DONE] sentinel  (emitted by api/chat.py)
+"""
+
+import json
+from collections.abc import AsyncGenerator
+
+from langchain_core.messages import HumanMessage
+
+from agents.graph import compiled_graph
+from agents.state import AgentState
+from schemas import ErrorEvent, TextEvent, ThoughtEvent
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+# Node names that should produce a visible "thought" event in the UI
+_AGENT_NODES: frozenset[str] = frozenset(
+    {"supervisor", "librarian", "scout", "analyst", "critic", "synthesizer"}
+)
+
+# Human-readable status label for each node
+_NODE_LABELS: dict[str, str] = {
+    "supervisor":   "Supervisor is routing the query…",
+    "librarian":    "Librarian is searching the document store…",
+    "scout":        "Scout is browsing the web…",
+    "analyst":      "Analyst is running the code…",
+    "critic":       "Critic is evaluating the retrieved context…",
+    "synthesizer":  "Synthesizer is writing the final answer…",
+}
+
+
+# ---------------------------------------------------------------------------
+# Helper
+# ---------------------------------------------------------------------------
+
+def _sse(event_model) -> str:
+    """Serialise a Pydantic event model into an SSE data line."""
+    return f"data: {json.dumps(event_model.model_dump())}\n\n"
+
+
+# ---------------------------------------------------------------------------
+# Public async generator — consumed by api/chat.py
+# ---------------------------------------------------------------------------
+
+async def run_research_pipeline(query: str) -> AsyncGenerator[str, None]:
+    """
+    Drive the LangGraph pipeline and yield SSE strings for every meaningful
+    event.
+
+    The compiled graph is consumed via `astream_events(version="v2")`, which
+    emits granular LangChain callback events for every node entry, LLM call,
+    and streamed token — without needing any custom callback handlers.
+
+    Yields
+    ------
+    SSE-formatted strings of the form:
+        data: <json_payload>\\n\\n
+    """
+    initial_state: AgentState = {
+        "messages":          [HumanMessage(content=query)],
+        "current_agent":     "",
+        "retrieved_context": [],
+        "is_valid":          False,
+        "route_command":     "route_to_rag",  # overwritten immediately by supervisor
+    }
+
+    try:
+        async for event in compiled_graph.astream_events(initial_state, version="v2"):
+            event_type: str = event["event"]
+            # `langgraph_node` in metadata tells us which node fired this event
+            node_name: str = event.get("metadata", {}).get("langgraph_node", "")
+
+            # ── Node start → surface a thought event ──────────────────────
+            if event_type == "on_chain_start" and node_name in _AGENT_NODES:
+                label = _NODE_LABELS.get(node_name, f"{node_name.title()} is working…")
+                yield _sse(ThoughtEvent(content=label))
+
+            # ── Streamed token from Synthesizer → text event ──────────────
+            # We intentionally filter to 'synthesizer' only so that the
+            # Supervisor and Critic's internal LLM calls stay invisible to
+            # the end user (they already produced ThoughtEvents above).
+            elif (
+                event_type == "on_chat_model_stream"
+                and node_name == "synthesizer"
+            ):
+                chunk = event["data"].get("chunk")
+                if chunk and chunk.content:
+                    yield _sse(TextEvent(content=chunk.content))
+
+    except Exception as exc:  # noqa: BLE001
+        yield _sse(ErrorEvent(content=f"Pipeline error: {exc}"))
+
+
+# ---------------------------------------------------------------------------
+# Helper
+# ---------------------------------------------------------------------------
+
+
+def _sse(event: ThoughtEvent | TextEvent | ErrorEvent) -> str:
+    """Serialise a Pydantic event model to an SSE data line."""
+    return f"data: {json.dumps(event.model_dump())}\n\n"

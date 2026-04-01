@@ -1,0 +1,28 @@
+# Core framework
+fastapi==0.115.12
+uvicorn[standard]==0.34.0
+python-multipart>=0.0.9
+
+# Data validation
+pydantic==2.11.1
+pydantic-settings==2.8.1
+
+# LangGraph — agent orchestration state machine
+langgraph>=0.3.0
+
+# LangChain core abstractions (messages, runnables, callbacks)
+langchain-core>=0.3.0
+langchain-community>=0.3.0
+langchain-huggingface>=0.1.0
+langchain-text-splitters>=0.3.0
+
+# Gemini LLM + embeddings provider
+langchain-google-genai>=2.1.0
+
+# Vector database
+chromadb>=0.6.0
+langchain-chroma>=0.2.0
+
+# PDF parsing + local sentence-transformer embeddings
+pypdf>=5.0.0
+sentence-transformers>=3.0.0
