@@ -19,12 +19,11 @@ start with a fresh collection.
 
 from __future__ import annotations
 
-from pathlib import Path
-
-from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from pydantic import SecretStr
 
 from core.config import settings
 
@@ -39,21 +38,32 @@ PERSIST_DIRECTORY = "./chroma_db_data"
 # Embeddings — reuse a single instance across the process lifetime
 # ---------------------------------------------------------------------------
 
-class _LocalEmbeddings(Embeddings):
-    """Minimal LangChain-compatible wrapper around Chroma's sentence-transformer embedder."""
+_google_api_key = SecretStr(settings.gemini_api_key) if settings.gemini_api_key else None
 
-    def __init__(self, model_name: str) -> None:
-        self._embedding_function = SentenceTransformerEmbeddingFunction(model_name=model_name)
+_document_embeddings = GoogleGenerativeAIEmbeddings(
+    model=settings.embedding_model,
+    google_api_key=_google_api_key,
+    task_type="retrieval_document",
+)
+
+_query_embeddings = GoogleGenerativeAIEmbeddings(
+    model=settings.embedding_model,
+    google_api_key=_google_api_key,
+    task_type="retrieval_query",
+)
+
+
+class _GeminiRetrievalEmbeddings(Embeddings):
+    """Use dedicated Gemini task types for index-time and query-time embeddings."""
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        embeddings = self._embedding_function(texts)
-        return [list(vector) for vector in embeddings]
+        return _document_embeddings.embed_documents(texts)
 
     def embed_query(self, text: str) -> list[float]:
-        return list(self._embedding_function([text])[0])
+        return _query_embeddings.embed_query(text)
 
 
-_embeddings = _LocalEmbeddings(settings.embedding_model)
+_embeddings: Embeddings = _GeminiRetrievalEmbeddings()
 
 # ---------------------------------------------------------------------------
 # Chroma vector store — lazy singleton

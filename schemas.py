@@ -62,6 +62,16 @@ class ChatSummary(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ChatCreateOut(BaseModel):
+    """Payload returned immediately after creating a new chat session."""
+
+    chat_id: int
+    title: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class MessageOut(BaseModel):
     """Serialised message record."""
 
@@ -108,10 +118,18 @@ class ChatDetail(BaseModel):
 class DocumentStatusOut(BaseModel):
     """Current processing status of a document."""
 
-    id: int
+    document_id: int
     status: str
 
     model_config = {"from_attributes": True}
+
+
+class DocumentUploadAcceptedOut(BaseModel):
+    """Upload acceptance payload returned immediately while processing runs."""
+
+    document_id: int
+    file_name: str
+    status: str
 
 
 class PresignedUrlOut(BaseModel):

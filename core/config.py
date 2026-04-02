@@ -16,7 +16,7 @@ class Settings(BaseSettings):
 
     # Gemini / LangChain
     # Set GEMINI_API_KEY in your .env file — never hard-code the key here.
-    gemini_api_key: str = ""
+    gemini_api_key: str = "AIzaSyBGvangjiJlFvoUs1OTMifJivomr2M9wY4"
     gemini_model: str = "gemini-2.0-flash"
 
     # AWS S3
@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     s3_bucket_name: str = "jarvis-documents"
 
     # Retrieval
-    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    embedding_model: str = "gemini-embedding-001"
     max_search_results: int = 5
 
 

@@ -1,55 +1,83 @@
 """
 api/documents.py
 ----------------
-Document handling endpoints — upload, status check, and presigned URL generation.
+Document handling endpoints for upload, status polling, and presigned URL access.
 
-Router prefix: /api/documents
+Routes exposed under /api:
+- POST /chats/{chat_id}/documents
+- GET /documents/{document_id}/status
+- GET /documents/{document_id}/url
 """
 
 from __future__ import annotations
 
-import time
+import tempfile
+from pathlib import Path
 from typing import Annotated
+from urllib.parse import unquote, urlparse
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_core.documents import Document as LangChainDocument
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from sqlalchemy.orm import Session
 
 from core.config import settings
 from database import SessionLocal, get_db
 from models import Chat, Document
-from schemas import DocumentOut, DocumentStatusOut, PresignedUrlOut
+from schemas import DocumentStatusOut, DocumentUploadAcceptedOut, PresignedUrlOut
+from tools.vector_store import add_documents
 
-router = APIRouter(prefix="/documents", tags=["documents"])
+router = APIRouter(tags=["documents"])
 
 
 # ---------------------------------------------------------------------------
-# Background task — mock RAG processing
+# Background task — asynchronous RAG ingestion
 # ---------------------------------------------------------------------------
 
 
 def process_document_rag(document_id: int) -> None:
     """
-    Mock document processing pipeline.
+    Download PDF from S3, chunk it, generate embeddings, and update status.
 
-    Sleeps for 10 seconds to simulate RAG ingestion, then marks the
-    document as 'ready'.  Uses its own DB session because background
-    tasks run outside the request lifecycle.
+    Uses its own DB session because background tasks run outside the request
+    lifecycle.
     """
     db = SessionLocal()
+    temp_file_path: Path | None = None
+
     try:
-        time.sleep(10)
         doc = db.query(Document).filter(Document.id == document_id).first()
-        if doc:
-            doc.status = "ready"
-            db.commit()
+        if doc is None:
+            return
+
+        temp_file_path = _download_s3_object_to_tempfile(doc.s3_url, doc.file_name)
+
+        loader = PyPDFLoader(str(temp_file_path))
+        pages = loader.load()
+
+        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        chunks: list[LangChainDocument] = splitter.split_documents(pages)
+
+        for chunk in chunks:
+            chunk.metadata["chat_id"] = doc.chat_id
+            chunk.metadata["document_id"] = doc.id
+            chunk.metadata["source_file"] = doc.file_name
+
+        add_documents(chunks)
+
+        doc.status = "ready"
+        db.commit()
     except Exception:
         doc = db.query(Document).filter(Document.id == document_id).first()
         if doc:
             doc.status = "failed"
             db.commit()
     finally:
+        if temp_file_path is not None:
+            temp_file_path.unlink(missing_ok=True)
         db.close()
 
 
@@ -68,14 +96,26 @@ def _get_s3_client():
     )
 
 
-def _upload_to_s3(file: UploadFile, chat_id: int) -> str:
+def _split_s3_url(s3_url: str) -> tuple[str, str]:
+    """Extract bucket and key from an S3 URL in virtual-host format."""
+    parsed = urlparse(s3_url)
+    bucket = parsed.netloc.split(".s3.")[0]
+    key = unquote(parsed.path.lstrip("/"))
+
+    if not bucket or not key:
+        raise ValueError("Invalid S3 URL")
+
+    return bucket, key
+
+
+def _upload_to_s3(file: UploadFile, chat_id: int, file_name: str) -> str:
     """
     Upload a file to the configured S3 bucket.
 
     Returns the full S3 object URL.
     """
     s3 = _get_s3_client()
-    key = f"chats/{chat_id}/{file.filename}"
+    key = f"chats/{chat_id}/{file_name}"
     s3.upload_fileobj(
         file.file,
         settings.s3_bucket_name,
@@ -85,14 +125,20 @@ def _upload_to_s3(file: UploadFile, chat_id: int) -> str:
     return f"https://{settings.s3_bucket_name}.s3.{settings.aws_region}.amazonaws.com/{key}"
 
 
+def _download_s3_object_to_tempfile(s3_url: str, source_file_name: str) -> Path:
+    """Download an S3 object to a temporary local file and return its path."""
+    bucket, key = _split_s3_url(s3_url)
+    suffix = Path(source_file_name).suffix or ".pdf"
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+        _get_s3_client().download_fileobj(bucket, key, temp_file)
+        return Path(temp_file.name)
+
+
 def _generate_presigned_url(s3_url: str, expiration: int = 3600) -> str:
     """Generate a presigned GET URL from the stored S3 object URL."""
     s3 = _get_s3_client()
-    # Extract bucket and key from the full URL
-    # Format: https://<bucket>.s3.<region>.amazonaws.com/<key>
-    parts = s3_url.replace("https://", "").split("/", 1)
-    bucket = parts[0].split(".s3.")[0]
-    key = parts[1] if len(parts) > 1 else ""
+    bucket, key = _split_s3_url(s3_url)
     return s3.generate_presigned_url(
         "get_object",
         Params={"Bucket": bucket, "Key": key},
@@ -105,28 +151,53 @@ def _generate_presigned_url(s3_url: str, expiration: int = 3600) -> str:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/chats/{chat_id}/documents", response_model=DocumentOut, status_code=202)
+@router.post(
+    "/chats/{chat_id}/document",
+    response_model=DocumentUploadAcceptedOut,
+    status_code=202,
+    responses={
+        400: {"description": "Only PDF files are supported."},
+        404: {"description": "Chat not found."},
+        500: {"description": "S3 upload failed."},
+    },
+    include_in_schema=False,
+)
+@router.post(
+    "/chats/{chat_id}/documents",
+    response_model=DocumentUploadAcceptedOut,
+    status_code=202,
+    responses={
+        400: {"description": "Only PDF files are supported."},
+        404: {"description": "Chat not found."},
+        500: {"description": "S3 upload failed."},
+    },
+)
 def upload_document(
     chat_id: int,
     background_tasks: BackgroundTasks,
     file: Annotated[UploadFile, File(...)],
-    db: Session = Depends(get_db),
+    db: Annotated[Session, Depends(get_db)],
 ):
     """
-    Upload a PDF to S3, create a Document record with status 'processing',
-    and kick off background RAG processing.  Returns 202 Accepted immediately.
+    Upload a PDF to S3, create a Document row with status 'processing',
+    and trigger asynchronous RAG processing.
     """
     chat = db.query(Chat).filter(Chat.id == chat_id).first()
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
 
-    # Upload to S3
-    s3_url = _upload_to_s3(file, chat_id)
+    file_name = file.filename or "uploaded.pdf"
+    if Path(file_name).suffix.lower() != ".pdf":
+        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
-    # Persist document record
+    try:
+        s3_url = _upload_to_s3(file, chat_id, file_name)
+    except (BotoCoreError, ClientError) as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to upload document to S3: {exc}")
+
     document = Document(
         chat_id=chat_id,
-        file_name=file.filename or "uploaded.pdf",
+        file_name=file_name,
         s3_url=s3_url,
         status="processing",
     )
@@ -134,23 +205,37 @@ def upload_document(
     db.commit()
     db.refresh(document)
 
-    # Queue background processing
     background_tasks.add_task(process_document_rag, document.id)
 
-    return document
+    return DocumentUploadAcceptedOut(
+        document_id=document.id,
+        file_name=document.file_name,
+        status=document.status,
+    )
 
 
-@router.get("/{document_id}/status", response_model=DocumentStatusOut)
-def get_document_status(document_id: int, db: Session = Depends(get_db)):
+@router.get(
+    "/documents/{document_id}/status",
+    response_model=DocumentStatusOut,
+    responses={404: {"description": "Document not found."}},
+)
+def get_document_status(document_id: int, db: Annotated[Session, Depends(get_db)]):
     """Return the current processing status of a document."""
     document = db.query(Document).filter(Document.id == document_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-    return document
+    return DocumentStatusOut(document_id=document.id, status=document.status)
 
 
-@router.get("/{document_id}/url", response_model=PresignedUrlOut)
-def get_document_url(document_id: int, db: Session = Depends(get_db)):
+@router.get(
+    "/documents/{document_id}/url",
+    response_model=PresignedUrlOut,
+    responses={
+        404: {"description": "Document not found."},
+        500: {"description": "Failed to generate presigned URL."},
+    },
+)
+def get_document_url(document_id: int, db: Annotated[Session, Depends(get_db)]):
     """Generate and return an S3 presigned URL for downloading/previewing the PDF."""
     document = db.query(Document).filter(Document.id == document_id).first()
     if not document:
