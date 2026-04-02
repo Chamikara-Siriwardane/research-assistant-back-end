@@ -12,5 +12,8 @@ wheels/
 # SQLite database
 jarvis_dev.db
 
+# Chroma persistent data
+chroma_data/
+
 # Environment
 .env

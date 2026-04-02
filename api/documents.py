@@ -11,6 +11,7 @@ Routes exposed under /api:
 
 from __future__ import annotations
 
+import logging
 import tempfile
 from pathlib import Path
 from typing import Annotated
@@ -28,7 +29,9 @@ from core.config import settings
 from database import SessionLocal, get_db
 from models import Chat, Document
 from schemas import DocumentStatusOut, DocumentUploadAcceptedOut, PresignedUrlOut
-from tools.vector_store import add_documents
+from services.vector_store import add_document_chunks
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["documents"])
 
@@ -45,32 +48,38 @@ def process_document_rag(document_id: int) -> None:
     Uses its own DB session because background tasks run outside the request
     lifecycle.
     """
+    logger.info(f"Starting background RAG ingestion for document_id={document_id}")
     db = SessionLocal()
     temp_file_path: Path | None = None
 
     try:
         doc = db.query(Document).filter(Document.id == document_id).first()
         if doc is None:
+            logger.warning(f"Document ID {document_id} not found in database. Aborting.")
             return
 
+        logger.info(f"[Doc {document_id}] Downloading from S3: {doc.s3_url}")
         temp_file_path = _download_s3_object_to_tempfile(doc.s3_url, doc.file_name)
 
+        logger.info(f"[Doc {document_id}] Loading PDF contents...")
         loader = PyPDFLoader(str(temp_file_path))
         pages = loader.load()
+        logger.info(f"[Doc {document_id}] Loaded {len(pages)} pages.")
 
+        logger.info(f"[Doc {document_id}] Splitting text into chunks...")
         splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         chunks: list[LangChainDocument] = splitter.split_documents(pages)
+        logger.info(f"[Doc {document_id}] Created {len(chunks)} chunks.")
 
-        for chunk in chunks:
-            chunk.metadata["chat_id"] = doc.chat_id
-            chunk.metadata["document_id"] = doc.id
-            chunk.metadata["source_file"] = doc.file_name
-
-        add_documents(chunks)
+        logger.info(f"[Doc {document_id}] Embedding and storing chunks in vector DB...")
+        chunk_texts = [chunk.page_content for chunk in chunks]
+        add_document_chunks(chunk_texts, chat_id=doc.chat_id, document_id=doc.id)
 
         doc.status = "ready"
         db.commit()
-    except Exception:
+        logger.info(f"[Doc {document_id}] Ingestion complete. Status marked as 'ready'.")
+    except Exception as e:
+        logger.error(f"[Doc {document_id}] Failed during RAG ingestion: {e}", exc_info=True)
         doc = db.query(Document).filter(Document.id == document_id).first()
         if doc:
             doc.status = "failed"
@@ -78,6 +87,7 @@ def process_document_rag(document_id: int) -> None:
     finally:
         if temp_file_path is not None:
             temp_file_path.unlink(missing_ok=True)
+            logger.info(f"[Doc {document_id}] Cleaned up temporary file.")
         db.close()
 
 
@@ -88,12 +98,13 @@ def process_document_rag(document_id: int) -> None:
 
 def _get_s3_client():
     """Build a boto3 S3 client from application settings."""
-    return boto3.client(
-        "s3",
-        aws_access_key_id=settings.aws_access_key_id,
-        aws_secret_access_key=settings.aws_secret_access_key,
-        region_name=settings.aws_region,
-    )
+    client_kwargs = {"region_name": settings.aws_region}
+
+    if settings.aws_access_key_id and settings.aws_secret_access_key:
+        client_kwargs["aws_access_key_id"] = settings.aws_access_key_id
+        client_kwargs["aws_secret_access_key"] = settings.aws_secret_access_key
+
+    return boto3.client("s3", **client_kwargs)
 
 
 def _split_s3_url(s3_url: str) -> tuple[str, str]:
@@ -151,17 +162,6 @@ def _generate_presigned_url(s3_url: str, expiration: int = 3600) -> str:
 # ---------------------------------------------------------------------------
 
 
-@router.post(
-    "/chats/{chat_id}/document",
-    response_model=DocumentUploadAcceptedOut,
-    status_code=202,
-    responses={
-        400: {"description": "Only PDF files are supported."},
-        404: {"description": "Chat not found."},
-        500: {"description": "S3 upload failed."},
-    },
-    include_in_schema=False,
-)
 @router.post(
     "/chats/{chat_id}/documents",
     response_model=DocumentUploadAcceptedOut,

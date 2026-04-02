@@ -10,6 +10,8 @@ implementations (Tavily, SerpAPI, ChromaDB, Pinecone, etc.) as needed.
 
 from __future__ import annotations
 
+import asyncio
+
 
 # ---------------------------------------------------------------------------
 # Web search tool
@@ -27,6 +29,8 @@ async def web_search(query: str, max_results: int = 5) -> list[dict]:
 
     TODO: integrate a real provider (Tavily, SerpAPI, Brave Search…).
     """
+    await asyncio.sleep(0)
+
     # Mock response — remove once a real client is wired up
     return [
         {
@@ -43,29 +47,17 @@ async def web_search(query: str, max_results: int = 5) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-async def vector_store_search(query: str, top_k: int = 2) -> list[dict]:
+async def vector_store_search(chat_id: int, query: str, top_k: int = 2) -> list[dict]:
     """
-    Perform a semantic similarity search against the local ChromaDB collection.
+    Perform a chat-scoped semantic similarity search against the local ChromaDB collection.
 
-    Returns a list of chunk dicts with the keys:
-        - content   (str)   — raw document text
-        - source    (str)   — originating document identifier
-        - title     (str)   — human-readable document title
-        - year      (int)   — publication / report year
-        - category  (str)   — thematic category for downstream filtering
+    Returns chunk dicts containing:
+        - id (str)
+        - content (str)
+        - metadata (dict)
+        - distance (float | None)
     """
-    from tools.vector_store import get_retriever  # local import avoids circular deps at startup
+    from services.vector_store import query_chat_documents
 
-    retriever = get_retriever(k=top_k)
-    docs = await retriever.ainvoke(query)
-
-    return [
-        {
-            "content": doc.page_content,
-            "source": doc.metadata.get("source", "unknown"),
-            "title": doc.metadata.get("title", ""),
-            "year": doc.metadata.get("year"),
-            "category": doc.metadata.get("category", ""),
-        }
-        for doc in docs
-    ]
+    await asyncio.sleep(0)
+    return query_chat_documents(query_text=query, chat_id=chat_id, n_results=top_k)

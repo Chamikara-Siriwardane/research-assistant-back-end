@@ -1,63 +1,120 @@
 """
 api/messages.py
 ---------------
-Core AI engine endpoint — SSE streaming for agent thoughts and answer tokens.
+Core AI engine endpoint — SSE streaming for chat responses.
 
 Router prefix: /api/messages
 """
 
-import asyncio
 import json
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
 from sqlalchemy.orm import Session
 
+from core.config import settings
 from database import get_db
 from models import Chat, Message
-from schemas import MessageCreate
+from schemas import ErrorEvent, MessageCreate, TextEvent, ThoughtEvent
+from services.vector_store import query_chat_documents
 
 router = APIRouter(prefix="/messages", tags=["messages"])
 
 
-async def _mock_agent_stream(user_content: str) -> AsyncGenerator[str, None]:
+def _sse(event_model) -> str:
+    """Serialise a Pydantic event model into an SSE data line."""
+    return f"data: {json.dumps(event_model.model_dump())}\n\n"
+
+
+async def _chat_stream(chat_id: int, user_content: str, db: Session) -> AsyncGenerator[str, None]:
     """
-    Yield a mock stream of JSON SSE events simulating the agent-thoughts
-    pipeline.  Replace with real LangGraph orchestration later.
-
-    Stream sequence:
-      1. Routing Agent thought
-      2. RAG Agent thought
-      3. Token-by-token answer
+    Retrieve chat-scoped context from Chroma, then stream a Gemini response.
     """
-    # Step 1 — Routing agent thought
-    yield f"data: {json.dumps({'type': 'thought', 'content': '[Routing Agent] Analyzing request...'})}\n\n"
-    await asyncio.sleep(1)
+    full_response = ""
 
-    # Step 2 — RAG agent thought
-    yield f"data: {json.dumps({'type': 'thought', 'content': '[RAG Agent] Searching vector database...'})}\n\n"
-    await asyncio.sleep(1)
+    try:
+        yield _sse(ThoughtEvent(content="Retrieving context from the active chat..."))
+        matches = query_chat_documents(query_text=user_content, chat_id=chat_id, n_results=5)
 
-    # Step 3 — Streamed answer tokens
-    tokens = ["Based ", "on the ", "document..."]
-    for token in tokens:
-        yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
+        if matches:
+            yield _sse(ThoughtEvent(content=f"Retrieved {len(matches)} relevant chunk(s) from this chat."))
+            context_block = "\n\n".join(
+                f"[Chunk {index}] {match['content']}\nMetadata: {json.dumps(match['metadata'])}"
+                for index, match in enumerate(matches, start=1)
+            )
+        else:
+            yield _sse(ThoughtEvent(content="No chat-scoped document chunks were found."))
+            context_block = "No document context available for this chat."
 
-    # Signal end of stream
-    yield "data: [DONE]\n\n"
+        llm = ChatGoogleGenerativeAI(
+            model=settings.gemini_model,
+            google_api_key=settings.gemini_api_key,
+            temperature=0.3,
+            streaming=True,
+        )
+
+        system_prompt = SystemMessage(
+            content=(
+                "You are Jarvis, a careful research assistant. Use the retrieved "
+                "chat-scoped document context to answer the user's question. "
+                "If the context is insufficient, say so plainly."
+            )
+        )
+        user_prompt = HumanMessage(
+            content=(
+                f"User question:\n{user_content}\n\n"
+                f"Retrieved context:\n{context_block}"
+            )
+        )
+
+        async for chunk in llm.astream([system_prompt, user_prompt]):
+            chunk_content = chunk.content
+            if isinstance(chunk_content, list):
+                chunk_content = "".join(
+                    part.get("text", "") if isinstance(part, dict) else str(part)
+                    for part in chunk_content
+                )
+            if chunk_content:
+                text = str(chunk_content)
+                full_response += text
+                yield _sse(TextEvent(content=text))
+
+        assistant_message = Message(
+            chat_id=chat_id,
+            sender_type="jarvis",
+            content=full_response,
+        )
+        db.add(assistant_message)
+        chat = db.query(Chat).filter(Chat.id == chat_id).first()
+        if chat:
+            chat.updated_at = datetime.now(timezone.utc)
+        db.commit()
+
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        yield _sse(ErrorEvent(content=f"Pipeline error: {exc}"))
+
+    finally:
+        yield "data: [DONE]\n\n"
 
 
-@router.post("/chats/{chat_id}/messages/stream")
+@router.post(
+    "/chats/{chat_id}/messages/stream",
+    responses={404: {"description": "Chat not found."}},
+)
 async def stream_message(
     chat_id: int,
     body: MessageCreate,
-    db: Session = Depends(get_db),
+    db: Annotated[Session, Depends(get_db)],
 ):
     """
     Accept a user message, persist it, and stream back SSE events
-    containing agent thoughts and answer tokens.
+    containing retrieval thoughts and answer tokens.
     """
     chat = db.query(Chat).filter(Chat.id == chat_id).first()
     if not chat:
@@ -79,7 +136,7 @@ async def stream_message(
     db.commit()
 
     return StreamingResponse(
-        _mock_agent_stream(body.content),
+        _chat_stream(chat_id, body.content, db),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

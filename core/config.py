@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Optional
 
 
 class Settings(BaseSettings):
@@ -16,12 +17,12 @@ class Settings(BaseSettings):
 
     # Gemini / LangChain
     # Set GEMINI_API_KEY in your .env file — never hard-code the key here.
-    gemini_api_key: str = "AIzaSyBGvangjiJlFvoUs1OTMifJivomr2M9wY4"
+    gemini_api_key: Optional[str] = None
     gemini_model: str = "gemini-2.0-flash"
 
     # AWS S3
-    aws_access_key_id: str = ""
-    aws_secret_access_key: str = ""
+    aws_access_key_id: Optional[str] = None
+    aws_secret_access_key: Optional[str] = None
     aws_region: str = "us-east-1"
     s3_bucket_name: str = "jarvis-documents"
 
