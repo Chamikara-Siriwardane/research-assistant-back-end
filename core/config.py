@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.0-flash"
 
+    # AWS S3
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+    aws_region: str = "us-east-1"
+    s3_bucket_name: str = "jarvis-documents"
+
     # Retrieval
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     max_search_results: int = 5

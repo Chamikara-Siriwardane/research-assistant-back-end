@@ -11,8 +11,18 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.chat import router as chat_router
+from api.chats import router as chats_router
+from api.documents import router as documents_router
+from api.messages import router as messages_router
 from api.upload import router as upload_router
 from core.config import settings
+from database import Base, engine
+
+# ---------------------------------------------------------------------------
+# Create database tables on startup
+# ---------------------------------------------------------------------------
+
+Base.metadata.create_all(bind=engine)
 
 # ---------------------------------------------------------------------------
 # Application factory
@@ -42,6 +52,9 @@ app.add_middleware(
 
 app.include_router(chat_router, prefix="/api")
 app.include_router(upload_router, prefix="/api")
+app.include_router(chats_router, prefix="/api")
+app.include_router(documents_router, prefix="/api")
+app.include_router(messages_router, prefix="/api")
 
 # ---------------------------------------------------------------------------
 # Health check
