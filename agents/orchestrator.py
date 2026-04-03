@@ -19,7 +19,7 @@ Event mapping
 import json
 from collections.abc import AsyncGenerator
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import BaseMessage
 
 from agents.graph import compiled_graph
 from agents.state import AgentState
@@ -59,14 +59,22 @@ def _sse(event_model) -> str:
 # Public async generator — consumed by api/chat.py
 # ---------------------------------------------------------------------------
 
-async def run_research_pipeline(query: str) -> AsyncGenerator[str, None]:
+async def run_research_pipeline(
+    messages: list[BaseMessage],
+    chat_id: int,
+) -> AsyncGenerator[str, None]:
     """
     Drive the LangGraph pipeline and yield SSE strings for every meaningful
     event.
 
-    The compiled graph is consumed via `astream_events(version="v2")`, which
-    emits granular LangChain callback events for every node entry, LLM call,
-    and streamed token — without needing any custom callback handlers.
+    Parameters
+    ----------
+    messages : list[BaseMessage]
+        Sliding-window conversation history (already formatted as LangChain
+        message objects by the endpoint).
+    chat_id : int
+        Active chat session — forwarded into the graph state so the
+        Librarian can scope its ChromaDB queries.
 
     Yields
     ------
@@ -74,7 +82,8 @@ async def run_research_pipeline(query: str) -> AsyncGenerator[str, None]:
         data: <json_payload>\\n\\n
     """
     initial_state: AgentState = {
-        "messages":          [HumanMessage(content=query)],
+        "messages":          messages,
+        "chat_id":           chat_id,
         "current_agent":     "",
         "retrieved_context": [],
         "is_valid":          False,
@@ -106,13 +115,3 @@ async def run_research_pipeline(query: str) -> AsyncGenerator[str, None]:
 
     except Exception as exc:  # noqa: BLE001
         yield _sse(ErrorEvent(content=f"Pipeline error: {exc}"))
-
-
-# ---------------------------------------------------------------------------
-# Helper
-# ---------------------------------------------------------------------------
-
-
-def _sse(event: ThoughtEvent | TextEvent | ErrorEvent) -> str:
-    """Serialise a Pydantic event model to an SSE data line."""
-    return f"data: {json.dumps(event.model_dump())}\n\n"

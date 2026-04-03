@@ -37,6 +37,10 @@ class AgentState(TypedDict):
     # overwriting the list, so parallel branches don't clobber each other.
     messages: Annotated[list[BaseMessage], add_messages]
 
+    # The active chat session — used by the Librarian to scope ChromaDB
+    # queries and by the endpoint to persist messages.
+    chat_id: int
+
     # Name of the node that is *currently* acting.
     # Surfaced in the UI as a "thought" event.
     current_agent: str

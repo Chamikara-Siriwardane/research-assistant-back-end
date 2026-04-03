@@ -15,6 +15,12 @@ class ChatRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=4096, description="The user's research question.")
 
 
+class StreamMessageRequest(BaseModel):
+    """Body for POST /api/chats/{chat_id}/messages/stream."""
+
+    content: str = Field(..., min_length=1, max_length=4096, description="The user's message.")
+
+
 # ---------------------------------------------------------------------------
 # SSE event shapes (used for documentation / type-safety; serialised to JSON)
 # ---------------------------------------------------------------------------
