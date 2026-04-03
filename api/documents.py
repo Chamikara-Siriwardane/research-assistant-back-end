@@ -19,7 +19,7 @@ from urllib.parse import unquote, urlparse
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Request
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_core.documents import Document as LangChainDocument
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -173,6 +173,7 @@ def _generate_presigned_url(s3_url: str, expiration: int = 3600) -> str:
     },
 )
 def upload_document(
+    request: Request,
     chat_id: int,
     background_tasks: BackgroundTasks,
     file: Annotated[UploadFile, File(...)],
@@ -182,17 +183,34 @@ def upload_document(
     Upload a PDF to S3, create a Document row with status 'processing',
     and trigger asynchronous RAG processing.
     """
+    logger.info(
+        "[POST /api/chats/%s/documents] Request received from client=%s filename=%s content_type=%s",
+        chat_id,
+        request.client.host if request.client else "unknown",
+        file.filename,
+        file.content_type,
+    )
+
     chat = db.query(Chat).filter(Chat.id == chat_id).first()
     if not chat:
+        logger.warning("[POST /api/chats/%s/documents] Chat not found", chat_id)
         raise HTTPException(status_code=404, detail="Chat not found")
 
     file_name = file.filename or "uploaded.pdf"
     if Path(file_name).suffix.lower() != ".pdf":
+        logger.warning(
+            "[POST /api/chats/%s/documents] Rejected non-PDF file: %s",
+            chat_id,
+            file_name,
+        )
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
     try:
+        logger.info("[POST /api/chats/%s/documents] Uploading file to S3", chat_id)
         s3_url = _upload_to_s3(file, chat_id, file_name)
+        logger.info("[POST /api/chats/%s/documents] S3 upload complete: %s", chat_id, s3_url)
     except (BotoCoreError, ClientError) as exc:
+        logger.exception("[POST /api/chats/%s/documents] S3 upload failed", chat_id)
         raise HTTPException(status_code=500, detail=f"Failed to upload document to S3: {exc}")
 
     document = Document(
@@ -204,8 +222,19 @@ def upload_document(
     db.add(document)
     db.commit()
     db.refresh(document)
+    logger.info(
+        "[POST /api/chats/%s/documents] Document created document_id=%s status=%s",
+        chat_id,
+        document.id,
+        document.status,
+    )
 
     background_tasks.add_task(process_document_rag, document.id)
+    logger.info(
+        "[POST /api/chats/%s/documents] Background ingestion queued for document_id=%s",
+        chat_id,
+        document.id,
+    )
 
     return DocumentUploadAcceptedOut(
         document_id=document.id,
@@ -221,9 +250,16 @@ def upload_document(
 )
 def get_document_status(document_id: int, db: Annotated[Session, Depends(get_db)]):
     """Return the current processing status of a document."""
+    logger.info("[GET /api/documents/%s/status] Status request received", document_id)
     document = db.query(Document).filter(Document.id == document_id).first()
     if not document:
+        logger.warning("[GET /api/documents/%s/status] Document not found", document_id)
         raise HTTPException(status_code=404, detail="Document not found")
+    logger.info(
+        "[GET /api/documents/%s/status] Returning status=%s",
+        document_id,
+        document.status,
+    )
     return DocumentStatusOut(document_id=document.id, status=document.status)
 
 

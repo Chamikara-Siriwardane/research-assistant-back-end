@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     app_title: str = "Agentic RAG Research Assistant"
     app_version: str = "0.1.0"
     debug: bool = False
+    log_level: str = "INFO"
 
     # CORS
     allowed_origins: list[str] = ["http://localhost:5173"]
