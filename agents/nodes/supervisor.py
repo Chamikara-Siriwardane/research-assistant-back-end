@@ -5,7 +5,7 @@ Supervisor node implementation.
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from agents.nodes.common import build_llm, last_human_query
+from agents.nodes.common import ainvoke_with_retry, build_llm, last_human_query
 from agents.state import AgentState, RouteCommand
 
 
@@ -103,11 +103,15 @@ async def supervisor_node(state: AgentState) -> dict:
         )
     )
 
-    decision: RouterDecision = await router_llm.ainvoke(
-        [system_prompt, user_prompt]
+    decision: RouterDecision | None = await ainvoke_with_retry(
+        router_llm, [system_prompt, user_prompt]
     )
+
+    # Guard: if the model fails to return parseable structured output, default
+    # to RAG so the pipeline does something useful rather than crashing.
+    route = decision.route if decision is not None else "route_to_rag"
 
     return {
         "current_agent": "supervisor",
-        "route_command": decision.route,
+        "route_command": route,
     }

@@ -87,6 +87,7 @@ async def run_research_pipeline(
         "current_agent":     "",
         "retrieved_context": [],
         "is_valid":          False,
+        "retry_count":       0,
         "route_command":     "route_to_rag",  # overwritten immediately by supervisor
     }
 
@@ -97,7 +98,14 @@ async def run_research_pipeline(
             node_name: str = event.get("metadata", {}).get("langgraph_node", "")
 
             # ── Node start → surface a thought event ──────────────────────
-            if event_type == "on_chain_start" and node_name in _AGENT_NODES:
+            # Check event["name"] == node_name so sub-runnables within the
+            # node (LLM chain, structured-output wrapper, etc.) don't each
+            # fire a duplicate thought — only the top-level node entry does.
+            if (
+                event_type == "on_chain_start"
+                and node_name in _AGENT_NODES
+                and event.get("name") == node_name
+            ):
                 label = _NODE_LABELS.get(node_name, f"{node_name.title()} is working…")
                 yield _sse(ThoughtEvent(content=label))
 

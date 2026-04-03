@@ -5,7 +5,7 @@ Critic node implementation.
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from agents.nodes.common import build_llm, last_human_query
+from agents.nodes.common import ainvoke_with_retry, build_llm, last_human_query
 from agents.state import AgentState
 
 
@@ -69,9 +69,17 @@ async def critic_node(state: AgentState) -> dict:
         )
     )
 
-    decision: CriticDecision = await critic_llm.ainvoke([system_prompt, user_prompt])
+    decision: CriticDecision | None = await ainvoke_with_retry(
+        critic_llm, [system_prompt, user_prompt]
+    )
+
+    # Guard: if the model fails to return parseable structured output, treat
+    # context as valid so the graph proceeds to the Synthesizer rather than
+    # crashing or looping.
+    is_valid = decision.is_valid if decision is not None else True
 
     return {
         "current_agent": "critic",
-        "is_valid": decision.is_valid,
+        "is_valid": is_valid,
+        "retry_count": state.get("retry_count", 0) + 1,
     }

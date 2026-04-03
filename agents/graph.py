@@ -61,13 +61,18 @@ def _supervisor_router(state: AgentState) -> str:
     return routing_map.get(state["route_command"], "supervisor")
 
 
+# Maximum number of retrieval-critique cycles before forcing synthesis.
+_MAX_RETRIES = 3
+
+
 def _critic_router(state: AgentState) -> str:
     """
-    Route to the Synthesizer when context is valid; loop back to the
-    Supervisor when it is not, giving the pipeline a chance to try a
-    different retrieval strategy.
+    Route to the Synthesizer when context is valid or the retry cap is hit;
+    loop back to the Supervisor otherwise for a different retrieval strategy.
     """
-    return "synthesizer" if state["is_valid"] else "supervisor"
+    if state["is_valid"] or state.get("retry_count", 0) >= _MAX_RETRIES:
+        return "synthesizer"
+    return "supervisor"
 
 
 # ---------------------------------------------------------------------------

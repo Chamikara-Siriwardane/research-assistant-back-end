@@ -4,7 +4,7 @@ Synthesizer node implementation.
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from agents.nodes.common import build_llm, last_human_query
+from agents.nodes.common import astream_with_retry, build_llm, last_human_query
 from agents.state import AgentState
 
 
@@ -51,7 +51,7 @@ async def synthesizer_node(state: AgentState) -> dict:
     )
 
     full_response = ""
-    async for chunk in llm.astream([system_prompt, user_prompt]):
+    async for chunk in astream_with_retry(llm, [system_prompt, user_prompt]):
         if chunk.content:
             full_response += chunk.content
 

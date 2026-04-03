@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     # Gemini / LangChain
     # Set GEMINI_API_KEY in your .env file — never hard-code the key here.
     gemini_api_key: Optional[str] = None
-    gemini_model: str = "gemini-2.0-flash"
+    gemini_model: str = "gemini-2.5-flash-lite"
 
     # AWS S3
     aws_access_key_id: Optional[str] = None

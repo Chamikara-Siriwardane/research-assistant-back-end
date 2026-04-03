@@ -109,11 +109,16 @@ def query_chat_documents(query_text: str, chat_id: int, n_results: int = 5) -> l
     if not query_text.strip():
         return []
 
+    # Embed the query manually using the retrieval_query task type, then pass
+    # query_embeddings directly so ChromaDB does not try to call embed_query
+    # on the collection's embedding function (which only handles documents).
+    query_vector = _get_query_embeddings().embed_query(query_text)
+
     results = get_collection().query(
-        query_texts=[query_text],
+        query_embeddings=[query_vector],
         n_results=n_results,
         where={"chat_id": chat_id},
-        include=["documents", "metadatas", "distances", "ids"],
+        include=["documents", "metadatas", "distances"],
     )
 
     documents = (results.get("documents") or [[]])[0]

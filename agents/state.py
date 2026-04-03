@@ -54,6 +54,11 @@ class AgentState(TypedDict):
     # False → loop back to Supervisor for a different retrieval strategy.
     is_valid: bool
 
+    # Incremented by the Critic after each retrieval cycle.
+    # The graph forces a route to Synthesizer once this hits MAX_RETRIES,
+    # preventing infinite loops when the Critic never marks context valid.
+    retry_count: int
+
     # Set by the Supervisor node.
     # Tells the conditional edge which specialist to activate next.
     route_command: RouteCommand
