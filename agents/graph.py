@@ -33,7 +33,7 @@ Topology
 
 from langgraph.graph import END, START, StateGraph
 
-from agents.agents import (
+from agents.nodes import (
     analyst_node,
     critic_node,
     librarian_node,
@@ -74,7 +74,7 @@ def _critic_router(state: AgentState) -> str:
 # Graph builder
 # ---------------------------------------------------------------------------
 
-def build_graph() -> StateGraph:
+def build_graph():
     """
     Construct, wire, and compile the research pipeline StateGraph.
 
