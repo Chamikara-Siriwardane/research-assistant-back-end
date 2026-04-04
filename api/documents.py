@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
+import threading
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import unquote, urlparse
@@ -20,9 +21,11 @@ from urllib.parse import unquote, urlparse
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Request
-from langchain_community.document_loaders import PyPDFLoader
 from langchain_core.documents import Document as LangChainDocument
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
+from marker.converters.pdf import PdfConverter
+from marker.models import create_model_dict
+from marker.renderers.markdown import MarkdownOutput
 from sqlalchemy.orm import Session
 
 from core.config import settings
@@ -34,6 +37,87 @@ from services.vector_store import add_document_chunks
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["documents"])
+
+
+# ---------------------------------------------------------------------------
+# marker-pdf — lazy model singleton and PDF-to-Markdown helpers
+# ---------------------------------------------------------------------------
+
+_marker_model_dict: dict | None = None
+_marker_model_lock = threading.Lock()
+
+# Headers marker uses to separate pages when paginate_output=True
+_PAGE_SEPARATOR = "-" * 48
+
+# Markdown heading levels forwarded to MarkdownHeaderTextSplitter
+_MD_HEADERS = [
+    ("#", "h1"),
+    ("##", "h2"),
+    ("###", "h3"),
+]
+
+# Soft ceiling for secondary character-level splitting
+_MAX_CHUNK_SIZE = 1000
+_CHUNK_OVERLAP = 100
+
+
+def _get_marker_models() -> dict:
+    """Load and cache the marker-pdf deep learning models (called once per process)."""
+    global _marker_model_dict
+    if _marker_model_dict is None:
+        with _marker_model_lock:
+            if _marker_model_dict is None:
+                logger.info("Loading marker-pdf models (first call — may take a moment)...")
+                _marker_model_dict = create_model_dict()
+                logger.info("marker-pdf models loaded successfully.")
+    return _marker_model_dict
+
+
+def _convert_pdf_to_markdown(pdf_path: Path) -> MarkdownOutput:
+    """Run marker-pdf on *pdf_path* and return a MarkdownOutput with page-separated Markdown."""
+    converter = PdfConverter(
+        artifact_dict=_get_marker_models(),
+        config={"paginate_output": True, "extract_images": False},
+    )
+    return converter(str(pdf_path))
+
+
+def _chunk_markdown(rendered: MarkdownOutput) -> list[LangChainDocument]:
+    """Split marker Markdown into structurally-aware LangChain Documents.
+
+    Strategy:
+    1. Split the full markdown on marker's page-separator to recover per-page text
+       and annotate each chunk with ``page`` metadata.
+    2. Within each page apply ``MarkdownHeaderTextSplitter`` so chunks respect
+       section boundaries and carry header-breadcrumb metadata (h1 / h2 / h3).
+    3. Apply ``RecursiveCharacterTextSplitter`` as a secondary pass so oversized
+       sections are further reduced without losing the header metadata.
+    """
+    md_splitter = MarkdownHeaderTextSplitter(
+        headers_to_split_on=_MD_HEADERS,
+        strip_headers=False,
+    )
+    char_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=_MAX_CHUNK_SIZE,
+        chunk_overlap=_CHUNK_OVERLAP,
+    )
+
+    all_chunks: list[LangChainDocument] = []
+    pages = rendered.markdown.split(_PAGE_SEPARATOR)
+
+    for page_num, page_md in enumerate(pages, start=1):
+        page_md = page_md.strip()
+        if not page_md:
+            continue
+
+        header_chunks = md_splitter.split_text(page_md)
+        sized_chunks = char_splitter.split_documents(header_chunks)
+
+        for chunk in sized_chunks:
+            chunk.metadata["page"] = page_num
+            all_chunks.append(chunk)
+
+    return all_chunks
 
 
 # ---------------------------------------------------------------------------
@@ -61,19 +145,18 @@ def process_document_rag(document_id: int) -> None:
         logger.info(f"[Doc {document_id}] Downloading from S3: {doc.s3_url}")
         temp_file_path = _download_s3_object_to_tempfile(doc.s3_url, doc.file_name)
 
-        logger.info(f"[Doc {document_id}] Loading PDF contents...")
-        loader = PyPDFLoader(str(temp_file_path))
-        pages = loader.load()
-        logger.info(f"[Doc {document_id}] Loaded {len(pages)} pages.")
+        logger.info(f"[Doc {document_id}] Converting PDF to Markdown with marker-pdf...")
+        rendered = _convert_pdf_to_markdown(temp_file_path)
+        logger.info(f"[Doc {document_id}] Markdown extraction complete.")
 
-        logger.info(f"[Doc {document_id}] Splitting text into chunks...")
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-        chunks: list[LangChainDocument] = splitter.split_documents(pages)
+        logger.info(f"[Doc {document_id}] Splitting Markdown into structured chunks...")
+        chunks = _chunk_markdown(rendered)
         logger.info(f"[Doc {document_id}] Created {len(chunks)} chunks.")
 
         logger.info(f"[Doc {document_id}] Embedding and storing chunks in vector DB...")
         chunk_texts = [chunk.page_content for chunk in chunks]
-        add_document_chunks(chunk_texts, chat_id=doc.chat_id, document_id=doc.id)
+        chunk_metadatas = [chunk.metadata for chunk in chunks]
+        add_document_chunks(chunk_texts, chat_id=doc.chat_id, document_id=doc.id, extra_metadatas=chunk_metadatas)
 
         doc.status = "ready"
         db.commit()

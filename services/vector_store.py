@@ -89,16 +89,32 @@ def get_collection() -> Any:
     return _collection
 
 
-def add_document_chunks(chunks: list[str], chat_id: int, document_id: int) -> list[str]:
-    """Insert document chunks into the global collection with per-chunk metadata."""
+def add_document_chunks(
+    chunks: list[str],
+    chat_id: int,
+    document_id: int,
+    extra_metadatas: list[dict] | None = None,
+) -> list[str]:
+    """Insert document chunks into the global collection with per-chunk metadata.
+
+    *extra_metadatas*, when provided, must have the same length as *chunks*.
+    Each entry is merged with the base ``chat_id`` / ``document_id`` metadata so
+    callers can attach page numbers, header breadcrumbs, etc.
+    All metadata values must be scalars (str, int, float, or bool) to satisfy
+    ChromaDB's constraints.
+    """
     if not chunks:
         return []
 
     ids = [f"doc_{document_id}_chunk_{index}" for index, _ in enumerate(chunks, start=1)]
-    metadatas = [
-        {"chat_id": chat_id, "document_id": document_id}
-        for _ in chunks
-    ]
+    base = {"chat_id": chat_id, "document_id": document_id}
+    if extra_metadatas:
+        metadatas = [
+            {**base, **{k: v for k, v in extra.items() if isinstance(v, (str, int, float, bool))}}
+            for extra in extra_metadatas
+        ]
+    else:
+        metadatas = [base for _ in chunks]
 
     get_collection().add(documents=chunks, metadatas=metadatas, ids=ids)
     return ids

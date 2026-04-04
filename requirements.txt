@@ -30,4 +30,4 @@ chromadb>=0.6.0
 langchain-chroma>=0.2.0
 
 # PDF parsing
-pypdf>=5.0.0
+marker-pdf

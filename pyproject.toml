@@ -15,7 +15,7 @@ dependencies = [
     "langchain-google-genai>=2.1.0,<3.0.0",
     "langchain-text-splitters>=0.3.0",
     "langgraph>=0.3.0",
-    "pypdf>=5.0.0",
+    "marker-pdf",
     "python-multipart>=0.0.9",
     "pydantic==2.11.1",
     "pydantic-settings>=2.8.1,<2.10.1",
