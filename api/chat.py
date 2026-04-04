@@ -20,9 +20,13 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
+from sqlalchemy import update as sa_update
 from sqlalchemy.orm import Session
 
 from agents.orchestrator import run_research_pipeline
+from core.config import settings
 from database import get_db
 from models import Chat, Message
 from schemas import ErrorEvent, StreamMessageRequest
@@ -35,6 +39,22 @@ router = APIRouter()
 
 # Maximum number of past messages fetched for the sliding window
 _WINDOW_SIZE = 6
+
+
+async def generate_chat_title(content: str) -> str:
+    """Use a lightweight LLM call to produce a concise 5-6 word chat title."""
+    llm = ChatGoogleGenerativeAI(
+        model=settings.gemini_model,
+        google_api_key=settings.gemini_api_key,
+        temperature=0.3,
+    )
+    prompt = (
+        "Summarize the following user message into a concise title. "
+        "Do not use quotes or punctuation. "
+        f"Message: {content}"
+    )
+    response = await llm.ainvoke([HumanMessage(content=prompt)])
+    return str(response.content).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -60,48 +80,59 @@ async def stream_message(
         log.warning("Chat not found | chat_id=%d", chat_id)
         raise HTTPException(status_code=404, detail="Chat not found")
 
-    # ── Step 1: Save user message ─────────────────────────────────────────
-    user_msg = Message(
-        chat_id=chat_id,
-        sender_type="user",
-        content=body.content,
-        timestamp=datetime.now(timezone.utc),
-    )
-    db.add(user_msg)
-    db.commit()
-    log.info("Step 1 | Saved user message | chat_id=%d | message_id=%d", chat_id, user_msg.id)
+    needs_title_update = chat.title in ("New Chat", "Untitled")
 
-    # ── Step 2: Fetch sliding-window history ──────────────────────────────
-    recent_rows = (
-        db.query(Message)
-        .filter(Message.chat_id == chat_id)
-        .order_by(Message.timestamp.desc())
-        .limit(_WINDOW_SIZE)
-        .all()
-    )
-    recent_rows.reverse()
-    log.info("Step 2 | Loaded sliding window | chat_id=%d | messages_fetched=%d", chat_id, len(recent_rows))
+    async def stream_generator() -> AsyncGenerator[str, None]:
+        # ── Title generation block ─────────────────────────────────────────
+        if needs_title_update:
+            new_title = await generate_chat_title(body.content)
+            db.execute(sa_update(Chat).where(Chat.id == chat_id).values(title=new_title))
+            db.commit()
+            yield f"data: {json.dumps({'type': 'title_update', 'content': new_title})}\n\n"
 
-    # ── Step 3: Format for LangChain ─────────────────────────────────────
-    from langchain_core.messages import AIMessage, HumanMessage
+        # ── Step 1: Save user message ─────────────────────────────────────
+        user_msg = Message(
+            chat_id=chat_id,
+            sender_type="user",
+            content=body.content,
+            timestamp=datetime.now(timezone.utc),
+        )
+        db.add(user_msg)
+        db.commit()
+        log.info("Step 1 | Saved user message | chat_id=%d | message_id=%d", chat_id, user_msg.id)
 
-    history: list[HumanMessage | AIMessage] = []
-    for row in recent_rows:
-        if row.sender_type == "user":
-            history.append(HumanMessage(content=row.content))
-        elif row.sender_type == "jarvis":
-            history.append(AIMessage(content=row.content))
+        # ── Step 2: Fetch sliding-window history ──────────────────────────
+        recent_rows = (
+            db.query(Message)
+            .filter(Message.chat_id == chat_id)
+            .order_by(Message.timestamp.desc())
+            .limit(_WINDOW_SIZE)
+            .all()
+        )
+        recent_rows.reverse()
+        log.info("Step 2 | Loaded sliding window | chat_id=%d | messages_fetched=%d", chat_id, len(recent_rows))
 
-    log.info(
-        "Step 3 | Formatted history | chat_id=%d | human=%d | ai=%d",
-        chat_id,
-        sum(1 for m in history if isinstance(m, HumanMessage)),
-        sum(1 for m in history if isinstance(m, AIMessage)),
-    )
+        # ── Step 3: Format for LangChain ─────────────────────────────────
+        history: list[HumanMessage | AIMessage] = []
+        for row in recent_rows:
+            if row.sender_type == "user":
+                history.append(HumanMessage(content=row.content))
+            elif row.sender_type == "jarvis":
+                history.append(AIMessage(content=row.content))
 
-    log.info("Step 4 | Starting LangGraph pipeline | chat_id=%d", chat_id)
+        log.info(
+            "Step 3 | Formatted history | chat_id=%d | human=%d | ai=%d",
+            chat_id,
+            sum(1 for m in history if isinstance(m, HumanMessage)),
+            sum(1 for m in history if isinstance(m, AIMessage)),
+        )
+
+        log.info("Step 4 | Starting LangGraph pipeline | chat_id=%d", chat_id)
+        async for chunk in _event_stream(history, chat_id, db):
+            yield chunk
+
     return StreamingResponse(
-        _event_stream(history, chat_id, db),
+        stream_generator(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

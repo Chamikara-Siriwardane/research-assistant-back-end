@@ -47,6 +47,13 @@ class ErrorEvent(BaseModel):
     content: str
 
 
+class TitleUpdateEvent(BaseModel):
+    """LLM-generated chat title emitted on the first message."""
+
+    type: Literal["title_update"] = "title_update"
+    content: str
+
+
 # ---------------------------------------------------------------------------
 # Chat Management schemas
 # ---------------------------------------------------------------------------
