@@ -29,5 +29,5 @@ langchain-google-genai>=2.1.0
 chromadb>=0.6.0
 langchain-chroma>=0.2.0
 
-# PDF parsing
-marker-pdf
+# PDF page slicing (no text extraction)
+pypdf>=4.0.0

@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     s3_bucket_name: str = "jarvis-documents"
 
     # Retrieval
-    embedding_model: str = "gemini-embedding-001"
+    embedding_model: str = "gemini-embedding-2-preview"
     max_search_results: int = 5
 
 

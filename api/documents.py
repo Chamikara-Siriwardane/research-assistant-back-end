@@ -11,28 +11,26 @@ Routes exposed under /api:
 
 from __future__ import annotations
 
+import io
 import logging
 import tempfile
-import threading
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import unquote, urlparse
 
 import boto3
+import pypdf
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Request
-from langchain_core.documents import Document as LangChainDocument
-from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
-from marker.converters.pdf import PdfConverter
-from marker.models import create_model_dict
-from marker.renderers.markdown import MarkdownOutput
+from google import genai
+from google.genai import types as genai_types
 from sqlalchemy.orm import Session
 
 from core.config import settings
 from database import SessionLocal, get_db
 from models import Chat, Document
 from schemas import DocumentStatusOut, DocumentUploadAcceptedOut, PresignedUrlOut
-from services.vector_store import add_document_chunks
+from services.vector_store import add_multimodal_pdf_pages
 
 logger = logging.getLogger(__name__)
 
@@ -40,84 +38,57 @@ router = APIRouter(tags=["documents"])
 
 
 # ---------------------------------------------------------------------------
-# marker-pdf — lazy model singleton and PDF-to-Markdown helpers
+# google-genai client — lazy singleton
 # ---------------------------------------------------------------------------
 
-_marker_model_dict: dict | None = None
-_marker_model_lock = threading.Lock()
-
-# Headers marker uses to separate pages when paginate_output=True
-_PAGE_SEPARATOR = "-" * 48
-
-# Markdown heading levels forwarded to MarkdownHeaderTextSplitter
-_MD_HEADERS = [
-    ("#", "h1"),
-    ("##", "h2"),
-    ("###", "h3"),
-]
-
-# Soft ceiling for secondary character-level splitting
-_MAX_CHUNK_SIZE = 1000
-_CHUNK_OVERLAP = 100
+_genai_client: genai.Client | None = None
 
 
-def _get_marker_models() -> dict:
-    """Load and cache the marker-pdf deep learning models (called once per process)."""
-    global _marker_model_dict
-    if _marker_model_dict is None:
-        with _marker_model_lock:
-            if _marker_model_dict is None:
-                logger.info("Loading marker-pdf models (first call — may take a moment)...")
-                _marker_model_dict = create_model_dict()
-                logger.info("marker-pdf models loaded successfully.")
-    return _marker_model_dict
+def _get_genai_client() -> genai.Client:
+    """Return the shared google-genai client (instantiated once per process)."""
+    global _genai_client
+    if _genai_client is None:
+        _genai_client = genai.Client(api_key=settings.gemini_api_key)
+    return _genai_client
 
 
-def _convert_pdf_to_markdown(pdf_path: Path) -> MarkdownOutput:
-    """Run marker-pdf on *pdf_path* and return a MarkdownOutput with page-separated Markdown."""
-    converter = PdfConverter(
-        artifact_dict=_get_marker_models(),
-        config={"paginate_output": True, "extract_images": False},
-    )
-    return converter(str(pdf_path))
+# ---------------------------------------------------------------------------
+# PDF page slicing — no text extraction performed
+# ---------------------------------------------------------------------------
 
+def _slice_pdf_to_pages(pdf_bytes: bytes) -> list[bytes]:
+    """Split a PDF byte stream into a list of single-page PDF byte streams.
 
-def _chunk_markdown(rendered: MarkdownOutput) -> list[LangChainDocument]:
-    """Split marker Markdown into structurally-aware LangChain Documents.
-
-    Strategy:
-    1. Split the full markdown on marker's page-separator to recover per-page text
-       and annotate each chunk with ``page`` metadata.
-    2. Within each page apply ``MarkdownHeaderTextSplitter`` so chunks respect
-       section boundaries and carry header-breadcrumb metadata (h1 / h2 / h3).
-    3. Apply ``RecursiveCharacterTextSplitter`` as a secondary pass so oversized
-       sections are further reduced without losing the header metadata.
+    Uses pypdf purely for structural slicing; no text is extracted.
     """
-    md_splitter = MarkdownHeaderTextSplitter(
-        headers_to_split_on=_MD_HEADERS,
-        strip_headers=False,
+    reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+    pages: list[bytes] = []
+    for page_index in range(len(reader.pages)):
+        writer = pypdf.PdfWriter()
+        writer.add_page(reader.pages[page_index])
+        buf = io.BytesIO()
+        writer.write(buf)
+        pages.append(buf.getvalue())
+    return pages
+
+
+# ---------------------------------------------------------------------------
+# Multimodal embedding — raw PDF page bytes → vector
+# ---------------------------------------------------------------------------
+
+def _embed_pdf_page(page_bytes: bytes) -> list[float]:
+    """Embed a single-page PDF directly via the Gemini multimodal embedding API."""
+    response = _get_genai_client().models.embed_content(
+        model=settings.embedding_model,
+        contents=[
+            genai_types.Part.from_bytes(
+                data=page_bytes,
+                mime_type="application/pdf",
+            )
+        ],
+        config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT"),
     )
-    char_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=_MAX_CHUNK_SIZE,
-        chunk_overlap=_CHUNK_OVERLAP,
-    )
-
-    all_chunks: list[LangChainDocument] = []
-    pages = rendered.markdown.split(_PAGE_SEPARATOR)
-
-    for page_num, page_md in enumerate(pages, start=1):
-        page_md = page_md.strip()
-        if not page_md:
-            continue
-
-        header_chunks = md_splitter.split_text(page_md)
-        sized_chunks = char_splitter.split_documents(header_chunks)
-
-        for chunk in sized_chunks:
-            chunk.metadata["page"] = page_num
-            all_chunks.append(chunk)
-
-    return all_chunks
+    return list(response.embeddings[0].values)
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +98,9 @@ def _chunk_markdown(rendered: MarkdownOutput) -> list[LangChainDocument]:
 
 def process_document_rag(document_id: int) -> None:
     """
-    Download PDF from S3, chunk it, generate embeddings, and update status.
+    Download PDF from S3, slice it into individual pages (no text extraction),
+    embed each page via the Gemini multimodal embedding API, and persist the
+    resulting vectors with page-level metadata.
 
     Uses its own DB session because background tasks run outside the request
     lifecycle.
@@ -144,19 +117,25 @@ def process_document_rag(document_id: int) -> None:
 
         logger.info(f"[Doc {document_id}] Downloading from S3: {doc.s3_url}")
         temp_file_path = _download_s3_object_to_tempfile(doc.s3_url, doc.file_name)
+        pdf_bytes = temp_file_path.read_bytes()
 
-        logger.info(f"[Doc {document_id}] Converting PDF to Markdown with marker-pdf...")
-        rendered = _convert_pdf_to_markdown(temp_file_path)
-        logger.info(f"[Doc {document_id}] Markdown extraction complete.")
+        logger.info(f"[Doc {document_id}] Slicing PDF into individual pages...")
+        page_byte_streams = _slice_pdf_to_pages(pdf_bytes)
+        logger.info(f"[Doc {document_id}] PDF has {len(page_byte_streams)} page(s).")
 
-        logger.info(f"[Doc {document_id}] Splitting Markdown into structured chunks...")
-        chunks = _chunk_markdown(rendered)
-        logger.info(f"[Doc {document_id}] Created {len(chunks)} chunks.")
+        logger.info(f"[Doc {document_id}] Embedding pages via Gemini multimodal API...")
+        embeddings: list[list[float]] = []
+        for page_index, page_bytes in enumerate(page_byte_streams, start=1):
+            embedding = _embed_pdf_page(page_bytes)
+            embeddings.append(embedding)
+            logger.debug(f"[Doc {document_id}] Embedded page {page_index}/{len(page_byte_streams)}")
 
-        logger.info(f"[Doc {document_id}] Embedding and storing chunks in vector DB...")
-        chunk_texts = [chunk.page_content for chunk in chunks]
-        chunk_metadatas = [chunk.metadata for chunk in chunks]
-        add_document_chunks(chunk_texts, chat_id=doc.chat_id, document_id=doc.id, extra_metadatas=chunk_metadatas)
+        logger.info(f"[Doc {document_id}] Storing {len(embeddings)} page vector(s) in ChromaDB...")
+        add_multimodal_pdf_pages(
+            embeddings=embeddings,
+            chat_id=doc.chat_id,
+            document_id=doc.id,
+        )
 
         doc.status = "ready"
         db.commit()

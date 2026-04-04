@@ -27,46 +27,52 @@ PERSIST_DIRECTORY = "./chroma_data"
 _client: chromadb.PersistentClient | None = None
 _collection: Any | None = None
 
-# Lazy-loaded Gemini embeddings with task-type support
-_document_embeddings: GoogleGenerativeAIEmbeddings | None = None
-_query_embeddings: GoogleGenerativeAIEmbeddings | None = None
+# Lazy-loaded Gemini text embeddings.
+# gemini-embedding-2-preview does not accept a task_type enum parameter for
+# text inputs. Asymmetric retrieval is achieved instead by embedding text
+# prefixes directly into the input content (see helpers below).
+_embeddings: GoogleGenerativeAIEmbeddings | None = None
 
 
-def _get_document_embeddings() -> GoogleGenerativeAIEmbeddings:
-    """Return the document-task embeddings (index-time)."""
-    global _document_embeddings
-    if _document_embeddings is None:
+def _get_embeddings() -> GoogleGenerativeAIEmbeddings:
+    """Return the shared Gemini text embeddings client."""
+    global _embeddings
+    if _embeddings is None:
         api_key = SecretStr(settings.gemini_api_key) if settings.gemini_api_key else None
-        _document_embeddings = GoogleGenerativeAIEmbeddings(
+        _embeddings = GoogleGenerativeAIEmbeddings(
             model=settings.embedding_model,
             google_api_key=api_key,
-            task_type="retrieval_document",
         )
-    return _document_embeddings
+    return _embeddings
 
 
-def _get_query_embeddings() -> GoogleGenerativeAIEmbeddings:
-    """Return the query-task embeddings (query-time)."""
-    global _query_embeddings
-    if _query_embeddings is None:
-        api_key = SecretStr(settings.gemini_api_key) if settings.gemini_api_key else None
-        _query_embeddings = GoogleGenerativeAIEmbeddings(
-            model=settings.embedding_model,
-            google_api_key=api_key,
-            task_type="retrieval_query",
-        )
-    return _query_embeddings
+def _format_document_for_embedding(text: str, title: str | None = None) -> str:
+    """Apply the gemini-embedding-2-preview document prefix format.
+
+    Format: ``title: {title} | text: {content}``
+    Per the official docs, use ``title: none`` when no title is available.
+    """
+    return f"title: {title or 'none'} | text: {text}"
+
+
+def _format_query_for_embedding(query: str) -> str:
+    """Apply the gemini-embedding-2-preview search-query prefix format.
+
+    Format: ``task: search result | query: {content}``
+    """
+    return f"task: search result | query: {query}"
 
 
 class _GeminiEmbeddingFunction:
     """Wrap Gemini embeddings for Chroma's embedding_function interface."""
 
     def name(self) -> str:
-        return "gemini-embedding-001"
+        return settings.embedding_model
 
     def __call__(self, input: list[str]) -> list[list[float]]:
-        """Embed documents using the document task type."""
-        return _get_document_embeddings().embed_documents(input)
+        """Embed documents using the gemini-embedding-2-preview document prefix format."""
+        formatted = [_format_document_for_embedding(doc) for doc in input]
+        return _get_embeddings().embed_documents(formatted)
 
 
 def _get_client() -> chromadb.PersistentClient:
@@ -87,6 +93,47 @@ def get_collection() -> Any:
             embedding_function=_GeminiEmbeddingFunction(),
         )
     return _collection
+
+
+def add_multimodal_pdf_pages(
+    embeddings: list[list[float]],
+    chat_id: int,
+    document_id: int,
+) -> list[str]:
+    """Insert pre-computed multimodal PDF page embeddings into the global collection.
+
+    Each page gets its own vector entry with the following metadata:
+    - ``chat_id``       — scopes the vector to the originating chat
+    - ``document_id``   — links back to the source Document row
+    - ``page_number``   — 1-based page index (enables fast page-targeted retrieval)
+    - ``chunk_type``    — always ``"multimodal_pdf_page"``
+
+    Embeddings are passed directly to ChromaDB so the collection's internal
+    embedding function is bypassed entirely.
+    """
+    if not embeddings:
+        return []
+
+    page_count = len(embeddings)
+    ids = [f"doc_{document_id}_page_{page_num}" for page_num in range(1, page_count + 1)]
+    documents = [f"PDF page {page_num}" for page_num in range(1, page_count + 1)]
+    metadatas = [
+        {
+            "chat_id": chat_id,
+            "document_id": document_id,
+            "page_number": page_num,
+            "chunk_type": "multimodal_pdf_page",
+        }
+        for page_num in range(1, page_count + 1)
+    ]
+
+    get_collection().add(
+        embeddings=embeddings,
+        documents=documents,
+        metadatas=metadatas,
+        ids=ids,
+    )
+    return ids
 
 
 def add_document_chunks(
@@ -125,10 +172,11 @@ def query_chat_documents(query_text: str, chat_id: int, n_results: int = 5) -> l
     if not query_text.strip():
         return []
 
-    # Embed the query manually using the retrieval_query task type, then pass
-    # query_embeddings directly so ChromaDB does not try to call embed_query
-    # on the collection's embedding function (which only handles documents).
-    query_vector = _get_query_embeddings().embed_query(query_text)
+    # Apply gemini-embedding-2-preview search-query prefix format, then pass
+    # the vector directly to ChromaDB so the collection's embedding function
+    # (document-side) is not invoked for queries.
+    formatted_query = _format_query_for_embedding(query_text)
+    query_vector = _get_embeddings().embed_query(formatted_query)
 
     results = get_collection().query(
         query_embeddings=[query_vector],

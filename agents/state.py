@@ -26,6 +26,16 @@ RouteCommand = Literal[
 ]
 
 # ---------------------------------------------------------------------------
+# Retrieved PDF page — emitted by the Librarian node
+# ---------------------------------------------------------------------------
+
+class RetrievedPage(TypedDict):
+    """A single PDF page fetched from S3 after a ChromaDB vector match."""
+    document_id: int    # FK to the Document row in SQLite
+    page_number: int    # 1-based page index within the source PDF
+    page_bytes: bytes   # Raw single-page PDF byte stream
+
+# ---------------------------------------------------------------------------
 # Graph state
 # ---------------------------------------------------------------------------
 
@@ -48,6 +58,11 @@ class AgentState(TypedDict):
     # Accumulated snippets / tool outputs from specialist agents.
     # Each agent node appends its results; the Synthesizer consumes all of them.
     retrieved_context: list[str]
+
+    # Raw PDF page bytes fetched from S3 by the Librarian node.
+    # Each entry corresponds to one ChromaDB vector match and carries the
+    # actual page content that the Synthesizer passes to the multimodal LLM.
+    retrieved_pages: list[RetrievedPage]
 
     # Set by the Critic node.
     # True  → route to Synthesizer.

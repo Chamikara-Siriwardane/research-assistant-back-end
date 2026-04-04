@@ -128,6 +128,8 @@ async def _event_stream(
     thought_count = 0
     start_time = time.monotonic()
 
+    log.info("Stream generator started | chat_id=%d | history_len=%d", chat_id, len(history))
+
     try:
         async for chunk in run_research_pipeline(history, chat_id):
             yield chunk
@@ -141,11 +143,26 @@ async def _event_stream(
                     if event_type == "text":
                         final_text_parts.append(payload["content"])
                         token_count += 1
+                        log.info(
+                            "SSE text token #%d | chat_id=%d | content=%.60r",
+                            token_count, chat_id, payload["content"],
+                        )
                     elif event_type == "thought":
                         thought_count += 1
-                        log.debug("SSE thought | chat_id=%d | %s", chat_id, payload.get("content", ""))
+                        log.info(
+                            "SSE thought #%d | chat_id=%d | content=%.120r",
+                            thought_count, chat_id, payload.get("content", ""),
+                        )
+                    elif event_type == "agent":
+                        log.info(
+                            "SSE agent transition | chat_id=%d | agent=%r",
+                            chat_id, payload.get("content", ""),
+                        )
                     elif event_type == "error":
-                        log.error("SSE pipeline error | chat_id=%d | %s", chat_id, payload.get("content", ""))
+                        log.error(
+                            "SSE pipeline error | chat_id=%d | content=%s",
+                            chat_id, payload.get("content", ""),
+                        )
             except (json.JSONDecodeError, KeyError):
                 pass
 

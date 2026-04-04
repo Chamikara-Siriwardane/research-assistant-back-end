@@ -86,6 +86,7 @@ async def run_research_pipeline(
         "chat_id":           chat_id,
         "current_agent":     "",
         "retrieved_context": [],
+        "retrieved_pages":   [],
         "is_valid":          False,
         "retry_count":       0,
         "route_command":     "route_to_rag",  # overwritten immediately by supervisor
