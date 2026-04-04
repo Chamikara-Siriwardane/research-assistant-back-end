@@ -18,9 +18,9 @@ _SYSTEM_PROMPT = (
     "query, and context retrieved by specialist agents.\n\n"
     "Guidelines:\n"
     "• Write a comprehensive, well-structured answer in Markdown.\n"
-    "• Start with a brief executive summary, then provide detailed "
-    "analysis organised under clear headings.\n"
-    "• Reference the source labels (e.g. [RAG Doc 1], [Web Result 2]) "
+    "• Start with the direct answer first, then provide a brief summary and supporting analysis.\n"
+    "• Use clear headings only when they improve readability.\n"
+    "• Reference the source labels (e.g. [Page 1], [Web Result 2]) "
     "inline as citations.\n"
     "• If the retrieved context is thin or partially relevant, still "
     "give the best answer you can and note any gaps honestly.\n"
@@ -51,15 +51,25 @@ async def synthesizer_node(state: AgentState) -> dict:
     if retrieved_pages:
         # ── Multimodal path: pass raw PDF pages inline to Gemini ──────────
         # Non-RAG context (web/analyst results) is still passed as text.
+        page_context = [
+            c for c in state["retrieved_context"]
+            if c.startswith("[Page ")
+        ]
         non_pdf_context = [
             c for c in state["retrieved_context"]
-            if not c.startswith("[RAG Doc")
+            if not c.startswith("[Page ")
         ]
 
         text_intro = (
             f"Conversation history:\n{history_block}\n\n"
             f"Latest query:\n{query}\n\n"
         )
+        if page_context:
+            text_intro += (
+                "Retrieved PDF page snippets:\n"
+                + "\n".join(page_context)
+                + "\n\n"
+            )
         if non_pdf_context:
             text_intro += (
                 "Additional context from other sources:\n"
@@ -72,7 +82,7 @@ async def synthesizer_node(state: AgentState) -> dict:
             "Read each page carefully and use its content to answer the query."
         )
 
-        content_parts: list[dict] = [{"type": "text", "text": text_intro}]
+        content_parts: list[str | dict[str, str]] = [{"type": "text", "text": text_intro}]
         for page in retrieved_pages:
             content_parts.append({
                 "type": "media",

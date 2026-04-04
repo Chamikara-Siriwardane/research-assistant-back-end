@@ -126,7 +126,7 @@ async def librarian_node(state: AgentState) -> dict:
             distance if distance is not None else 0.0,
             content,
         )
-        docs.append(f"[RAG Doc {i}] {content}")
+        docs.append(f"[Page {meta.get('page_number', '?')}] {content}")
 
     if not docs:
         log.info("Librarian: no uploaded documents found for chat_id=%d", chat_id)
