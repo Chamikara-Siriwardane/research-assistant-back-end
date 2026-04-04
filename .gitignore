@@ -10,7 +10,7 @@ wheels/
 .venv
 
 # SQLite database
-jarvis_dev.db
+#jarvis_dev.db
 
 # Chroma persistent data
 chroma_data/
