@@ -14,6 +14,7 @@ from __future__ import annotations
 import io
 import logging
 import tempfile
+import time
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import unquote, urlparse
@@ -105,43 +106,111 @@ def process_document_rag(document_id: int) -> None:
     Uses its own DB session because background tasks run outside the request
     lifecycle.
     """
-    logger.info(f"Starting background RAG ingestion for document_id={document_id}")
+    pipeline_start = time.perf_counter()
+    logger.info("=" * 60)
+    logger.info(f"[Doc {document_id}] RAG ingestion pipeline STARTED")
+    logger.info("=" * 60)
+
     db = SessionLocal()
     temp_file_path: Path | None = None
 
     try:
         doc = db.query(Document).filter(Document.id == document_id).first()
         if doc is None:
-            logger.warning(f"Document ID {document_id} not found in database. Aborting.")
+            logger.warning(f"[Doc {document_id}] Not found in database. Aborting.")
             return
 
-        logger.info(f"[Doc {document_id}] Downloading from S3: {doc.s3_url}")
+        logger.info(
+            f"[Doc {document_id}] File: '{doc.file_name}' | chat_id={doc.chat_id}"
+        )
+
+        # ── Step 1: Download from S3 ───────────────────────────────────────
+        logger.info(f"[Doc {document_id}] [1/4] Downloading from S3...")
+        t0 = time.perf_counter()
         temp_file_path = _download_s3_object_to_tempfile(doc.s3_url, doc.file_name)
         pdf_bytes = temp_file_path.read_bytes()
+        size_kb = len(pdf_bytes) / 1024
+        logger.info(
+            f"[Doc {document_id}] [1/4] Download complete — "
+            f"{size_kb:.1f} KB in {time.perf_counter() - t0:.2f}s"
+        )
 
-        logger.info(f"[Doc {document_id}] Slicing PDF into individual pages...")
+        # ── Step 2: Slice into pages ───────────────────────────────────────
+        logger.info(f"[Doc {document_id}] [2/4] Slicing PDF into individual pages...")
+        t0 = time.perf_counter()
         page_byte_streams = _slice_pdf_to_pages(pdf_bytes)
-        logger.info(f"[Doc {document_id}] PDF has {len(page_byte_streams)} page(s).")
+        total_pages = len(page_byte_streams)
+        logger.info(
+            f"[Doc {document_id}] [2/4] Slicing complete — "
+            f"{total_pages} page(s) in {time.perf_counter() - t0:.2f}s"
+        )
 
-        logger.info(f"[Doc {document_id}] Embedding pages via Gemini multimodal API...")
+        # ── Step 3: Embed each page via Gemini ────────────────────────────
+        logger.info(
+            f"[Doc {document_id}] [3/4] Embedding {total_pages} page(s) "
+            f"via Gemini multimodal API — this may take a while..."
+        )
         embeddings: list[list[float]] = []
+        embed_start = time.perf_counter()
+        _LOG_INTERVAL = 5  # log a progress line every N pages
+
         for page_index, page_bytes in enumerate(page_byte_streams, start=1):
+            page_t0 = time.perf_counter()
             embedding = _embed_pdf_page(page_bytes)
             embeddings.append(embedding)
-            logger.debug(f"[Doc {document_id}] Embedded page {page_index}/{len(page_byte_streams)}")
+            elapsed_page = time.perf_counter() - page_t0
 
-        logger.info(f"[Doc {document_id}] Storing {len(embeddings)} page vector(s) in ChromaDB...")
+            # Always log the first, last, and every _LOG_INTERVAL-th page.
+            if page_index == 1 or page_index == total_pages or page_index % _LOG_INTERVAL == 0:
+                elapsed_total = time.perf_counter() - embed_start
+                avg_per_page = elapsed_total / page_index
+                remaining = avg_per_page * (total_pages - page_index)
+                logger.info(
+                    f"[Doc {document_id}] [3/4] Embedded page {page_index}/{total_pages} "
+                    f"({page_index / total_pages * 100:.0f}%) | "
+                    f"page took {elapsed_page:.2f}s | "
+                    f"avg {avg_per_page:.2f}s/page | "
+                    f"est. remaining {remaining:.0f}s"
+                )
+
+        total_embed_time = time.perf_counter() - embed_start
+        logger.info(
+            f"[Doc {document_id}] [3/4] Embedding complete — "
+            f"{total_pages} page(s) in {total_embed_time:.2f}s "
+            f"(avg {total_embed_time / total_pages:.2f}s/page)"
+        )
+
+        # ── Step 4: Persist vectors in ChromaDB ───────────────────────────
+        logger.info(
+            f"[Doc {document_id}] [4/4] Storing {len(embeddings)} vector(s) in ChromaDB..."
+        )
+        t0 = time.perf_counter()
         add_multimodal_pdf_pages(
             embeddings=embeddings,
             chat_id=doc.chat_id,
             document_id=doc.id,
         )
+        logger.info(
+            f"[Doc {document_id}] [4/4] ChromaDB write complete in {time.perf_counter() - t0:.2f}s"
+        )
 
         doc.status = "ready"
         db.commit()
-        logger.info(f"[Doc {document_id}] Ingestion complete. Status marked as 'ready'.")
+
+        total_elapsed = time.perf_counter() - pipeline_start
+        logger.info("=" * 60)
+        logger.info(
+            f"[Doc {document_id}] RAG ingestion pipeline COMPLETE — "
+            f"{total_pages} page(s) | total time {total_elapsed:.2f}s | status=ready"
+        )
+        logger.info("=" * 60)
+
     except Exception as e:
-        logger.error(f"[Doc {document_id}] Failed during RAG ingestion: {e}", exc_info=True)
+        logger.error(
+            f"[Doc {document_id}] RAG ingestion pipeline FAILED after "
+            f"{time.perf_counter() - pipeline_start:.2f}s: {e}",
+            exc_info=True,
+        )
         doc = db.query(Document).filter(Document.id == document_id).first()
         if doc:
             doc.status = "failed"
@@ -149,7 +218,7 @@ def process_document_rag(document_id: int) -> None:
     finally:
         if temp_file_path is not None:
             temp_file_path.unlink(missing_ok=True)
-            logger.info(f"[Doc {document_id}] Cleaned up temporary file.")
+            logger.info(f"[Doc {document_id}] Temporary file cleaned up.")
         db.close()
 
 
