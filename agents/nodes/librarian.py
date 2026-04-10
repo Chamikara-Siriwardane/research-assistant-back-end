@@ -149,8 +149,29 @@ async def librarian_node(state: AgentState) -> dict:
         if (p["document_id"], p["page_number"]) not in existing
     ]
 
+    # Leave a structured signal in retrieved_context so the Critic knows that
+    # real PDF pages were fetched and will be passed to the Synthesizer as
+    # multimodal input.  Without this the Critic only sees short ChromaDB
+    # snippets and may incorrectly judge the context as insufficient.
+    page_summary: list[str] = []
+    if unique_new_pages:
+        page_refs = ", ".join(
+            f"doc_id={p['document_id']} page {p['page_number']}"
+            for p in unique_new_pages
+        )
+        page_summary.append(
+            f"[LIBRARIAN SUMMARY] Successfully fetched {len(unique_new_pages)} "
+            f"PDF page(s) for multimodal synthesis ({page_refs}). "
+            "The Synthesizer will receive these pages as full PDF image content "
+            "and does not depend solely on the text snippets above."
+        )
+        log.info(
+            "Librarian: appended page summary to retrieved_context | %s",
+            page_summary[0],
+        )
+
     return {
         "current_agent": "librarian",
-        "retrieved_context": state["retrieved_context"] + docs,
+        "retrieved_context": state["retrieved_context"] + docs + page_summary,
         "retrieved_pages": state.get("retrieved_pages", []) + unique_new_pages,
     }
