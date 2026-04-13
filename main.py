@@ -4,7 +4,7 @@ main.py
 Application entry point.
 
 Run locally with:
-    uvicorn main:app --reload --port 8000
+    uv run uvicorn main:app --reload --port 8000
 """
 
 import logging

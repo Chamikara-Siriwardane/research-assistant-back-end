@@ -35,6 +35,7 @@ async def supervisor_node(state: AgentState) -> dict:
     router_llm = llm.with_structured_output(RouterDecision)
 
     query = last_human_query(state)
+    has_documents: bool = state.get("has_documents", False)
 
     # ── Build a retry-aware context block ──────────────────────────────────
     # On the first pass retrieved_context is empty and route_command still
@@ -89,8 +90,7 @@ async def supervisor_node(state: AgentState) -> dict:
             "data manipulation, or any task best solved with code.\n"
             "• Choose route_to_synthesizer ONLY when the retrieved_context is "
             "already rich enough to fully answer the query.\n"
-            "• When in doubt between RAG and Web, prefer RAG if the user has "
-            "uploaded relevant documents for this chat.\n"
+            f"• {'The user HAS uploaded documents to this chat (has_documents=True). Strongly prefer route_to_rag unless the query clearly requires live web data or code execution.' if has_documents else 'The user has NOT uploaded any documents to this chat (has_documents=False). Do NOT use route_to_rag.'}\n"
             f"{retry_section}\n\n"
             "Return ONLY valid JSON matching the required schema."
         )

@@ -62,6 +62,7 @@ def _sse(event_model) -> str:
 async def run_research_pipeline(
     messages: list[BaseMessage],
     chat_id: int,
+    has_documents: bool = False,
 ) -> AsyncGenerator[str, None]:
     """
     Drive the LangGraph pipeline and yield SSE strings for every meaningful
@@ -75,6 +76,11 @@ async def run_research_pipeline(
     chat_id : int
         Active chat session — forwarded into the graph state so the
         Librarian can scope its ChromaDB queries.
+    has_documents : bool
+        Pre-computed (and cached) flag indicating whether the chat has at
+        least one ready document.  Passed straight into AgentState so the
+        Supervisor can make a data-driven routing decision without touching
+        the DB itself.
 
     Yields
     ------
@@ -90,6 +96,7 @@ async def run_research_pipeline(
         "is_valid":          False,
         "retry_count":       0,
         "route_command":     "route_to_rag",  # overwritten immediately by supervisor
+        "has_documents":     has_documents,
     }
 
     try:

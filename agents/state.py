@@ -77,3 +77,9 @@ class AgentState(TypedDict):
     # Set by the Supervisor node.
     # Tells the conditional edge which specialist to activate next.
     route_command: RouteCommand
+
+    # Injected by the endpoint before the graph starts.
+    # True when the chat has at least one document with status='ready'.
+    # Used by the Supervisor to make a data-driven RAG routing decision
+    # instead of relying purely on LLM inference.
+    has_documents: bool

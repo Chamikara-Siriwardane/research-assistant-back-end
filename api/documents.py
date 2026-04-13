@@ -32,6 +32,7 @@ from database import SessionLocal, get_db
 from models import Chat, Document
 from schemas import DocumentStatusOut, DocumentUploadAcceptedOut, PresignedUrlOut
 from services.vector_store import add_multimodal_pdf_pages
+from api.cache import invalidate_has_documents
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +197,7 @@ def process_document_rag(document_id: int) -> None:
 
         doc.status = "ready"
         db.commit()
+        invalidate_has_documents(doc.chat_id)
 
         total_elapsed = time.perf_counter() - pipeline_start
         logger.info("=" * 60)

@@ -26,9 +26,10 @@ from sqlalchemy import update as sa_update
 from sqlalchemy.orm import Session
 
 from agents.orchestrator import run_research_pipeline
+from api.cache import get_has_documents, set_has_documents
 from core.config import settings
 from database import get_db
-from models import Chat, Message
+from models import Chat, Document, Message
 from schemas import ErrorEvent, StreamMessageRequest
 
 log = logging.getLogger("api.chat")
@@ -82,6 +83,25 @@ async def stream_message(
 
     needs_title_update = chat.title in ("New Chat", "Untitled")
 
+    # ── Document presence check (cached per chat_id) ─────────────────────
+    has_docs = get_has_documents(chat_id)
+    if has_docs is None:
+        has_docs = (
+            db.query(Document)
+            .filter(Document.chat_id == chat_id, Document.status == "ready")
+            .first()
+        ) is not None
+        set_has_documents(chat_id, has_docs)
+        log.info(
+            "Document cache miss | chat_id=%d | has_documents=%s",
+            chat_id, has_docs,
+        )
+    else:
+        log.info(
+            "Document cache hit | chat_id=%d | has_documents=%s",
+            chat_id, has_docs,
+        )
+
     async def stream_generator() -> AsyncGenerator[str, None]:
         # ── Title generation block ─────────────────────────────────────────
         if needs_title_update:
@@ -128,7 +148,7 @@ async def stream_message(
         )
 
         log.info("Step 4 | Starting LangGraph pipeline | chat_id=%d", chat_id)
-        async for chunk in _event_stream(history, chat_id, db):
+        async for chunk in _event_stream(history, chat_id, has_docs, db):
             yield chunk
 
     return StreamingResponse(
@@ -149,6 +169,7 @@ async def stream_message(
 async def _event_stream(
     history: list,
     chat_id: int,
+    has_documents: bool,
     db: Session,
 ) -> AsyncGenerator[str, None]:
     """
@@ -162,7 +183,7 @@ async def _event_stream(
     log.info("Stream generator started | chat_id=%d | history_len=%d", chat_id, len(history))
 
     try:
-        async for chunk in run_research_pipeline(history, chat_id):
+        async for chunk in run_research_pipeline(history, chat_id, has_documents):
             yield chunk
 
             # Collect streamed text tokens and track event counts for logging
