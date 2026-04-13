@@ -2,12 +2,15 @@
 Supervisor node implementation.
 """
 
+import logging
+
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from agents.nodes.common import ainvoke_with_retry, build_llm, last_human_query
 from agents.state import AgentState, RouteCommand
 
+log = logging.getLogger("agents.supervisor")
 
 class RouterDecision(BaseModel):
     """Output schema for the Supervisor's routing decision."""
@@ -108,8 +111,17 @@ async def supervisor_node(state: AgentState) -> dict:
     )
 
     # Guard: if the model fails to return parseable structured output, default
-    # to RAG so the pipeline does something useful rather than crashing.
-    route = decision.route if decision is not None else "route_to_rag"
+    # to web search (never RAG — there may be no documents).
+    route = decision.route if decision is not None else "route_to_web"
+
+    # Hard override: never route to RAG when there are no uploaded documents,
+    # regardless of what the LLM decided. The prompt instructs against it but
+    # the LLM can ignore instructions on retry cycles.
+    if route == "route_to_rag" and not has_documents:
+        route = "route_to_web"
+        log.warning(
+            "Supervisor overrode route_to_rag → route_to_web (has_documents=False)"
+        )
 
     return {
         "current_agent": "supervisor",

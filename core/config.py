@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     aws_region: str = "us-east-1"
     s3_bucket_name: str = "jarvis-documents"
 
+    # SerpAPI (Scout node — web and academic search)
+    # Set SERP_API_KEY in your .env file.
+    serp_api_key: Optional[str] = None
+
     # Retrieval
     embedding_model: str = "gemini-embedding-2-preview"
     max_search_results: int = 5

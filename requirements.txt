@@ -31,3 +31,7 @@ langchain-chroma>=0.2.0
 
 # PDF page slicing (no text extraction)
 pypdf>=4.0.0
+
+# Scout node dependencies
+google-search-results>=2.4.2
+pymupdf>=1.24.0
