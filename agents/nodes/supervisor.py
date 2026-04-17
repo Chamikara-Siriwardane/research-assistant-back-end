@@ -3,6 +3,7 @@ Supervisor node implementation.
 """
 
 import logging
+import textwrap
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
@@ -49,16 +50,21 @@ async def supervisor_node(state: AgentState) -> dict:
     retry_section = ""
     if existing_context:
         tried_via = _ROUTE_TO_SPECIALIST.get(previous_route, previous_route)
-        snippets = "\n".join(f"  • {s[:120]}" for s in existing_context[:6])
-        retry_section = (
-            "\n\n⚠️  RETRY CONTEXT — a previous retrieval attempt was judged "
-            "INSUFFICIENT by the Critic.\n"
-            f"Previously tried route: {tried_via}\n"
-            f"Context retrieved so far:\n{snippets}\n\n"
-            "You MUST choose a DIFFERENT route this time, or route_to_synthesizer "
-            "only if the existing context is actually good enough despite the "
-            "Critic's objection."
-        )
+        snippets = "\n".join(f"- {s[:120]}" for s in existing_context[:6])
+        retry_section = textwrap.dedent(f"""
+
+            ## ⚠️ Retry Context
+
+            A previous retrieval attempt was judged **INSUFFICIENT** by the Critic.
+
+            **Previously tried route:** {tried_via}
+
+            **Context retrieved so far:**
+            {snippets}
+
+            You **MUST** choose a **different** route this time, or `route_to_synthesizer`
+            only if the existing context is actually good enough despite the Critic's objection.
+        """).rstrip()
 
     # ── Conversation history summary (keep token-light) ───────────────────
     history_lines: list[str] = []
@@ -70,33 +76,44 @@ async def supervisor_node(state: AgentState) -> dict:
         "\n".join(history_lines[-6:]) if history_lines else "(first message)"
     )
 
+    doc_status = (
+        "The user **HAS** uploaded documents to this chat (`has_documents=True`). "
+        "Strongly prefer `route_to_rag` unless the query clearly requires live web data or code execution."
+        if has_documents else
+        "The user has **NOT** uploaded any documents to this chat (`has_documents=False`). "
+        "Do **NOT** use `route_to_rag`."
+    )
+
     system_prompt = SystemMessage(
-        content=(
-            "You are the supervisor of a PhD-caliber research assistant named Jarvis. "
-            "Your job is to analyse the user's latest query together with the "
-            "conversation history and decide which specialist agent to invoke next.\n\n"
-            "Available routes:\n"
-            "  route_to_rag  → Librarian – searches the user's private uploaded "
-            "documents (PDFs) stored in a vector database.\n"
-            "  route_to_web  → Scout – performs live web searches for recent, "
-            "real-time, or news-based information.\n"
-            "  route_to_code → Analyst – executes code for data analysis, "
-            "calculations, or programmatic tasks.\n"
-            "  route_to_synthesizer → skip retrieval; enough context already "
-            "exists in state to write a final answer.\n\n"
-            "Guidelines:\n"
-            "• Choose route_to_rag when the query clearly refers to the user's "
-            "uploaded documents or private knowledge base.\n"
-            "• Choose route_to_web when the query needs up-to-date facts, news, "
-            "current events, or publicly available information.\n"
-            "• Choose route_to_code when the query involves maths, statistics, "
-            "data manipulation, or any task best solved with code.\n"
-            "• Choose route_to_synthesizer ONLY when the retrieved_context is "
-            "already rich enough to fully answer the query.\n"
-            f"• {'The user HAS uploaded documents to this chat (has_documents=True). Strongly prefer route_to_rag unless the query clearly requires live web data or code execution.' if has_documents else 'The user has NOT uploaded any documents to this chat (has_documents=False). Do NOT use route_to_rag.'}\n"
-            f"{retry_section}\n\n"
-            "Return ONLY valid JSON matching the required schema."
-        )
+        content=textwrap.dedent(f"""
+            ## Role
+
+            You are the **Supervisor** of a PhD-caliber research assistant named **Jarvis**.
+            Analyse the user's latest query together with the conversation history and decide
+            which specialist agent to invoke next.
+
+            ## Available Routes
+
+            | Route | Specialist | Use when |
+            |---|---|---|
+            | `route_to_rag` | **Librarian** | Query refers to the user's private uploaded documents (PDFs) in the vector store |
+            | `route_to_web` | **Scout** | Query needs up-to-date facts, news, current events, or publicly available information |
+            | `route_to_code` | **Analyst** | Query involves maths, statistics, data manipulation, or any task best solved with code |
+            | `route_to_synthesizer` | *(skip retrieval)* | Enough context already exists in state to write a final answer |
+
+            ## Routing Guidelines
+
+            - Choose `route_to_rag` when the query **clearly refers to uploaded documents** or the private knowledge base.
+            - Choose `route_to_web` when the query needs **real-time or public** information.
+            - Choose `route_to_code` when the query involves **computation or data tasks**.
+            - Choose `route_to_synthesizer` **only** when `retrieved_context` is already rich enough to fully answer the query.
+            - {doc_status}
+            {retry_section}
+
+            ## Output
+
+            Return ONLY valid JSON matching the required schema.
+        """).strip()
     )
 
     user_prompt = HumanMessage(

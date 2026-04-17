@@ -364,19 +364,25 @@ async def _llm_check_scholar_relevance(
     structured_llm = llm.with_structured_output(_ScholarRelevance)
 
     system = SystemMessage(
-        content=(
-            "You are a research assistant evaluating whether a set of Google "
-            "Scholar search results satisfactorily covers the user's query.\n\n"
-            "Decide has_match=True if at least one result is clearly about the "
-            "paper or topic the user named or described — even if the title "
-            "wording differs slightly.\n"
-            "Decide has_match=False if no result is about what the user asked "
-            "for (e.g. results are on a completely different topic).\n"
-            "If has_match=True, also provide the PDF URL of the best result "
-            "(prefer arXiv or open-access links). If no PDF is listed, leave "
-            "best_pdf_url empty.\n"
-            "Return ONLY valid JSON matching the required schema."
-        )
+        content=textwrap.dedent("""
+            ## Role
+
+            You are a research assistant evaluating whether a set of Google Scholar results
+            satisfactorily covers the user's query.
+
+            ## Decision Rules
+
+            - Set `has_match=True` if at least one result is clearly about the paper or topic
+              the user named or described — even if the title wording differs slightly.
+            - Set `has_match=False` if no result is about what the user asked for
+              (e.g. results are on a completely different topic).
+            - If `has_match=True`, provide the PDF URL of the best result (prefer arXiv or
+              open-access links). If no PDF is listed, leave `best_pdf_url` empty.
+
+            ## Output
+
+            Return ONLY valid JSON matching the required schema.
+        """).strip()
     )
     user = HumanMessage(
         content=(
@@ -472,22 +478,23 @@ def _format_web_results(raw: dict) -> str:
 # ---------------------------------------------------------------------------
 
 _SYNTHESIS_SYSTEM = textwrap.dedent("""
-    You are Scout, a research specialist inside Jarvis, a PhD-calibre AI
-    research assistant.
+    ## Role
 
-    You have just gathered the following evidence from web and academic
-    searches (and optionally a full PDF read).  Your task is to write a
-    comprehensive, well-structured answer to the user's query based solely
+    You are **Scout**, a research specialist inside Jarvis, a PhD-caliber AI research assistant.
+    You have just gathered evidence from web and academic searches (and optionally a full PDF read).
+    Your task is to write a comprehensive, well-structured answer to the user's query based solely
     on this evidence.
 
-    Include:
-      • Key findings / claims with inline source citations (title or URL).
-      • Authors and publication year for academic works.
-      • Direct quotes or paraphrases from any PDF text that was retrieved.
-      • If the exact paper was not found, clearly state that and summarise
-        the closest related work.
+    ## What to Include
 
-    Be thorough but concise.
+    - **Key findings and claims** with inline source citations (title or URL).
+    - **Authors and publication year** for academic works.
+    - **Direct quotes or paraphrases** from any PDF text that was retrieved.
+    - If the exact paper was not found, clearly state that and summarise the closest related work.
+
+    ## Style
+
+    Write in **Markdown**. Be thorough but concise. Avoid unsupported claims.
 """).strip()
 
 
