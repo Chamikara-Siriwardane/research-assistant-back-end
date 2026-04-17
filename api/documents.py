@@ -31,7 +31,7 @@ from core.config import settings
 from database import SessionLocal, get_db
 from models import Chat, Document
 from schemas import DocumentStatusOut, DocumentUploadAcceptedOut, PresignedUrlOut
-from services.vector_store import add_multimodal_pdf_pages
+from services.vector_store import add_multimodal_pdf_pages, delete_document_vectors
 from api.cache import invalidate_has_documents
 
 logger = logging.getLogger(__name__)
@@ -182,6 +182,10 @@ def process_document_rag(document_id: int) -> None:
         )
 
         # ── Step 4: Persist vectors in ChromaDB ───────────────────────────
+        logger.info(
+            f"[Doc {document_id}] [4/4] Purging any stale vectors for doc_id={document_id}…"
+        )
+        delete_document_vectors(document_id)
         logger.info(
             f"[Doc {document_id}] [4/4] Storing {len(embeddings)} vector(s) in ChromaDB..."
         )

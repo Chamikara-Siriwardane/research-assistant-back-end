@@ -201,6 +201,11 @@ def query_chat_documents(query_text: str, chat_id: int, n_results: int = 5) -> l
     ]
 
 
+def delete_document_vectors(document_id: int) -> None:
+    """Delete every vector associated with a specific document."""
+    get_collection().delete(where={"document_id": document_id})
+
+
 def delete_chat_data(chat_id: int) -> None:
     """Delete every vector associated with a chat."""
     get_collection().delete(where={"chat_id": chat_id})
