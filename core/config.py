@@ -1,5 +1,8 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
+import os
 from typing import Optional
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -35,5 +38,34 @@ class Settings(BaseSettings):
     embedding_model: str = "gemini-embedding-2-preview"
     max_search_results: int = 5
 
+    # LangSmith tracing
+    langsmith_tracing: bool = Field(default=False, alias="LANGSMITH_TRACING")
+    langsmith_endpoint: str = Field(
+        default="https://api.smith.langchain.com",
+        alias="LANGSMITH_ENDPOINT",
+    )
+    langsmith_api_key: Optional[str] = Field(default=None, alias="LANGSMITH_API_KEY")
+    langsmith_project: str = Field(default="Jarvis", alias="LANGSMITH_PROJECT")
+
 
 settings = Settings()
+
+
+def _configure_langsmith_env() -> None:
+    """Mirror LangSmith settings into process env for LangChain callbacks."""
+    if settings.langsmith_tracing:
+        os.environ["LANGSMITH_TRACING"] = "true"
+        # Backward-compatible flag used by some integrations.
+        os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
+
+    if settings.langsmith_endpoint:
+        os.environ["LANGSMITH_ENDPOINT"] = settings.langsmith_endpoint
+
+    if settings.langsmith_project:
+        os.environ["LANGSMITH_PROJECT"] = settings.langsmith_project
+
+    if settings.langsmith_api_key:
+        os.environ["LANGSMITH_API_KEY"] = settings.langsmith_api_key
+
+
+_configure_langsmith_env()
