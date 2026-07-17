@@ -102,6 +102,48 @@ async def stream_message(
             chat_id, has_docs,
         )
 
+    # ── Step 1: Save user message ────────────────────────────────────────
+    user_msg = Message(
+        chat_id=chat_id,
+        sender_type="user",
+        content=body.content,
+        timestamp=datetime.now(timezone.utc),
+    )
+    db.add(user_msg)
+    try:
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        log.exception("Failed to save user message | chat_id=%d", chat_id)
+        raise HTTPException(status_code=500, detail="Failed to save message") from exc
+    log.info("Step 1 | Saved user message | chat_id=%d | message_id=%d", chat_id, user_msg.id)
+
+    # ── Step 2: Fetch sliding-window history ──────────────────────────────
+    recent_rows = (
+        db.query(Message)
+        .filter(Message.chat_id == chat_id)
+        .order_by(Message.timestamp.desc())
+        .limit(_WINDOW_SIZE)
+        .all()
+    )
+    recent_rows.reverse()
+    log.info("Step 2 | Loaded sliding window | chat_id=%d | messages_fetched=%d", chat_id, len(recent_rows))
+
+    # ── Step 3: Format for LangChain ─────────────────────────────────────
+    history: list[HumanMessage | AIMessage] = []
+    for row in recent_rows:
+        if row.sender_type == "user":
+            history.append(HumanMessage(content=row.content))
+        elif row.sender_type == "jarvis":
+            history.append(AIMessage(content=row.content))
+
+    log.info(
+        "Step 3 | Formatted history | chat_id=%d | human=%d | ai=%d",
+        chat_id,
+        sum(1 for m in history if isinstance(m, HumanMessage)),
+        sum(1 for m in history if isinstance(m, AIMessage)),
+    )
+
     async def stream_generator() -> AsyncGenerator[str, None]:
         # ── Title generation block ─────────────────────────────────────────
         if needs_title_update:
@@ -109,43 +151,6 @@ async def stream_message(
             db.execute(sa_update(Chat).where(Chat.id == chat_id).values(title=new_title))
             db.commit()
             yield f"data: {json.dumps({'type': 'title_update', 'content': new_title})}\n\n"
-
-        # ── Step 1: Save user message ─────────────────────────────────────
-        user_msg = Message(
-            chat_id=chat_id,
-            sender_type="user",
-            content=body.content,
-            timestamp=datetime.now(timezone.utc),
-        )
-        db.add(user_msg)
-        db.commit()
-        log.info("Step 1 | Saved user message | chat_id=%d | message_id=%d", chat_id, user_msg.id)
-
-        # ── Step 2: Fetch sliding-window history ──────────────────────────
-        recent_rows = (
-            db.query(Message)
-            .filter(Message.chat_id == chat_id)
-            .order_by(Message.timestamp.desc())
-            .limit(_WINDOW_SIZE)
-            .all()
-        )
-        recent_rows.reverse()
-        log.info("Step 2 | Loaded sliding window | chat_id=%d | messages_fetched=%d", chat_id, len(recent_rows))
-
-        # ── Step 3: Format for LangChain ─────────────────────────────────
-        history: list[HumanMessage | AIMessage] = []
-        for row in recent_rows:
-            if row.sender_type == "user":
-                history.append(HumanMessage(content=row.content))
-            elif row.sender_type == "jarvis":
-                history.append(AIMessage(content=row.content))
-
-        log.info(
-            "Step 3 | Formatted history | chat_id=%d | human=%d | ai=%d",
-            chat_id,
-            sum(1 for m in history if isinstance(m, HumanMessage)),
-            sum(1 for m in history if isinstance(m, AIMessage)),
-        )
 
         log.info("Step 4 | Starting LangGraph pipeline | chat_id=%d", chat_id)
         async for chunk in _event_stream(history, chat_id, has_docs, db):
